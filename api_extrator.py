@@ -17,6 +17,8 @@ import concurrent.futures
 from threading import Semaphore, Lock
 import uuid
 from contextlib import contextmanager
+import os
+import requests
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [%(threadName)s] %(message)s')
@@ -28,6 +30,41 @@ logging.getLogger('urllib3').setLevel(logging.ERROR)
 
 app = Flask(__name__)
 CORS(app)
+
+# Diretório para extensões
+EXTENSIONS_DIR = os.path.join(os.getcwd(), 'extensions')
+UBLOCK_XPI = os.path.join(EXTENSIONS_DIR, 'ublock_origin.xpi')
+
+def download_ublock_origin():
+    """Baixa a extensão uBlock Origin se não existir"""
+    if not os.path.exists(EXTENSIONS_DIR):
+        os.makedirs(EXTENSIONS_DIR)
+        logger.info(f"📁 Diretório de extensões criado: {EXTENSIONS_DIR}")
+    
+    if os.path.exists(UBLOCK_XPI):
+        logger.info("✅ uBlock Origin já está baixado")
+        return True
+    
+    logger.info("⬇️ Baixando uBlock Origin...")
+    
+    try:
+        # URL da última versão do uBlock Origin para Firefox
+        # Você pode pegar o link direto do Mozilla Addons
+        url = "https://addons.mozilla.org/firefox/downloads/latest/ublock-origin/latest.xpi"
+        
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
+        
+        with open(UBLOCK_XPI, 'wb') as f:
+            f.write(response.content)
+        
+        logger.info(f"✅ uBlock Origin baixado: {UBLOCK_XPI}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"❌ Erro ao baixar uBlock Origin: {e}")
+        logger.warning("⚠️ Continuando sem uBlock Origin...")
+        return False
 
 # Pool de drivers otimizado
 class DriverPool:
@@ -68,7 +105,19 @@ class DriverPool:
             
             try:
                 driver = self.pool.get_nowait()
-                logger.info(f"[{driver_id}] Driver obtido do pool (reutilizado)")
+                # Verificar se está realmente funcional
+                try:
+                    driver.title
+                    logger.info(f"[{driver_id}] Driver obtido do pool (reutilizado)")
+                except:
+                    logger.warning(f"[{driver_id}] Driver do pool não funcional, criando novo...")
+                    try:
+                        driver.quit()
+                    except:
+                        pass
+                    with self.creation_lock:
+                        driver = self._create_driver()
+                        logger.info(f"[{driver_id}] Novo driver criado")
             except queue.Empty:
                 with self.creation_lock:
                     logger.info(f"[{driver_id}] Pool vazio, criando novo driver...")
@@ -132,13 +181,13 @@ class DriverPool:
     def _is_driver_healthy(self, driver):
         try:
             driver.current_url
-            driver.execute_script("return document.readyState;")
+            driver.title
             return True
         except:
             return False
     
     def _create_driver(self):
-        return criar_navegador_firefox_otimizado()
+        return criar_navegador_firefox_com_ublock()
     
     def get_stats(self):
         with self.lock:
@@ -149,15 +198,12 @@ class DriverPool:
                 'available_slots': self.semaphore._value
             }
 
-# Pool global
-driver_pool = DriverPool(max_size=6, max_concurrent=5)
-
-def criar_navegador_firefox_otimizado():
-    """Cria navegador Firefox otimizado com bloqueadores de anúncios"""
+def criar_navegador_firefox_com_ublock():
+    """Cria navegador Firefox com uBlock Origin"""
     options = Options()
     
     # Configurações básicas
-    options.add_argument("--headless")
+    # options.add_argument("--headless")  # Descomente para modo headless
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
@@ -167,19 +213,6 @@ def criar_navegador_firefox_otimizado():
     # User agent
     options.set_preference("general.useragent.override", 
                           "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0")
-    
-    # Bloqueadores de popups e anúncios AGRESSIVOS
-    options.set_preference("dom.popup_maximum", 0)
-    options.set_preference("dom.popup_allowed_events", "")
-    options.set_preference("dom.disable_open_during_load", True)
-    options.set_preference("privacy.popups.showBrowserMessage", False)
-    
-    # Bloquear scripts de terceiros suspeitos
-    options.set_preference("permissions.default.popup", 2)
-    
-    # Desabilitar notificações
-    options.set_preference("dom.webnotifications.enabled", False)
-    options.set_preference("dom.push.enabled", False)
     
     # Configurações anti-detecção
     options.set_preference("dom.webdriver.enabled", False)
@@ -194,19 +227,34 @@ def criar_navegador_firefox_otimizado():
     options.set_preference("dom.max_script_run_time", 30)
     options.set_preference("dom.max_chrome_script_run_time", 30)
     
+    # Desabilitar notificações
+    options.set_preference("dom.webnotifications.enabled", False)
+    options.set_preference("dom.push.enabled", False)
+    
+    # Adicionar uBlock Origin se disponível
+    if os.path.exists(UBLOCK_XPI):
+        logger.info("🛡️ Carregando uBlock Origin...")
+        # A extensão será instalada após criar o driver
+    
     try:
         service = Service(GeckoDriverManager().install())
         service.service_args = ['--log', 'fatal', '--marionette-port', '0']
         
         driver = webdriver.Firefox(service=service, options=options)
         
+        # Instalar uBlock Origin
+        if os.path.exists(UBLOCK_XPI):
+            try:
+                driver.install_addon(UBLOCK_XPI, temporary=True)
+                logger.info("✅ uBlock Origin instalado com sucesso!")
+                time.sleep(2)  # Aguardar extensão carregar
+            except Exception as e:
+                logger.warning(f"⚠️ Erro ao instalar uBlock Origin: {e}")
+        
         driver.set_page_load_timeout(30)
         driver.implicitly_wait(5)
         
-        # Injetar script anti-popup AGRESSIVO
-        driver.execute_cdp_cmd = lambda cmd, params: None  # Dummy para compatibilidade
-        
-        logger.info("Driver Firefox com bloqueadores criado!")
+        logger.info("🚀 Driver Firefox com uBlock Origin criado!")
         return driver
         
     except Exception as e:
@@ -217,7 +265,7 @@ def is_valid_wizercdn_url(url):
     """Valida URL do Wizercdn"""
     try:
         parsed = urlparse(url)
-        return 'warezcdn.com' in parsed.netloc.lower() or 'embed.warezcdn.com' in parsed.netloc.lower()
+        return 'warezcdn.cc' in parsed.netloc.lower() or 'embed.warezcdn.cc' in parsed.netloc.lower()
     except:
         return False
 
@@ -277,21 +325,10 @@ def close_popups(driver, driver_id):
         
         # Remover overlays via JavaScript
         driver.execute_script("""
-            // Remover overlays comuns de anúncios
             var overlays = document.querySelectorAll('[class*="overlay"], [class*="popup"], [id*="popup"], [class*="modal"]');
             overlays.forEach(function(el) {
                 if (el && el.parentNode) {
                     el.parentNode.removeChild(el);
-                }
-            });
-            
-            // Remover iframes de anúncios
-            var iframes = document.querySelectorAll('iframe:not([id*="player"]):not([class*="player"])');
-            iframes.forEach(function(iframe) {
-                if (iframe && iframe.src && !iframe.src.includes('mixdrop')) {
-                    try {
-                        iframe.parentNode.removeChild(iframe);
-                    } catch(e) {}
                 }
             });
         """)
@@ -315,13 +352,29 @@ def extract_video_from_wizercdn(url, driver_id, timeout=60):
             # Fechar popups iniciais
             close_popups(driver, assigned_id)
             
-            # Passo 2 e 3: Clicar no audio-selector com mixdrop e lang=2
+            # Passo 2 e 3: Clicar no audio-selector
             logger.info(f"[{assigned_id}] 2️⃣ Procurando audio-selector (mixdrop, lang=2)...")
             try:
-                audio_selector = WebDriverWait(driver, 10).until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, 'audio-selector[data-servers="mixdrop"][data-lang="2"]'))
-                )
-                logger.info(f"[{assigned_id}] ✅ Audio-selector encontrado")
+                audio_selectors = [
+                    'audio-selector[data-servers="mixdrop"][data-lang="2"]',
+                    'audio-selector[data-server="mixdrop"][data-lang="2"]',
+                    '[data-servers*="mixdrop"][data-lang="2"]',
+                    '.audio-selector[data-servers*="mixdrop"]'
+                ]
+                
+                audio_selector = None
+                for selector in audio_selectors:
+                    try:
+                        audio_selector = WebDriverWait(driver, 5).until(
+                            EC.presence_of_element_located((By.CSS_SELECTOR, selector))
+                        )
+                        logger.info(f"[{assigned_id}] ✅ Audio-selector encontrado com: {selector}")
+                        break
+                    except:
+                        continue
+                
+                if not audio_selector:
+                    raise Exception("Audio-selector não encontrado")
                 
                 if not safe_click(driver, audio_selector, assigned_id):
                     raise Exception("Falha ao clicar no audio-selector")
@@ -329,77 +382,77 @@ def extract_video_from_wizercdn(url, driver_id, timeout=60):
                 time.sleep(2)
                 close_popups(driver, assigned_id)
                 
-                # Verificar se ficou ativo
-                has_active = driver.execute_script("""
-                    var el = document.querySelector('audio-selector[data-servers="mixdrop"][data-lang="2"]');
-                    return el ? el.classList.contains('active') : false;
-                """)
-                logger.info(f"[{assigned_id}] Audio-selector active: {has_active}")
-                
-            except TimeoutException:
-                logger.error(f"[{assigned_id}] ❌ Audio-selector não encontrado")
+            except Exception as e:
+                logger.error(f"[{assigned_id}] ❌ Erro com audio-selector: {e}")
                 return None
             
-            # Passo 4 e 5: Clicar no server-selector com mixdrop e lang=2
+            # Passo 4 e 5: Clicar no server-selector
             logger.info(f"[{assigned_id}] 3️⃣ Procurando server-selector (mixdrop, lang=2)...")
             try:
-                server_selector = WebDriverWait(driver, 10).until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, 'server-selector[data-servers="mixdrop"][data-lang="2"]'))
-                )
-                logger.info(f"[{assigned_id}] ✅ Server-selector encontrado")
+                server_selectors = [
+                    'server-selector[data-servers="mixdrop"][data-lang="2"]',
+                    'server-selector[data-server="mixdrop"][data-lang="2"]',
+                    '[data-servers*="mixdrop"][data-lang="2"]',
+                    '.server-selector[data-servers*="mixdrop"]',
+                    'li[data-server*="mixdrop"]',
+                    'button[data-server*="mixdrop"]'
+                ]
                 
-                if not safe_click(driver, server_selector, assigned_id):
-                    raise Exception("Falha ao clicar no server-selector")
+                server_selector = None
+                for selector in server_selectors:
+                    try:
+                        server_selector = WebDriverWait(driver, 5).until(
+                            EC.presence_of_element_located((By.CSS_SELECTOR, selector))
+                        )
+                        logger.info(f"[{assigned_id}] ✅ Server-selector encontrado com: {selector}")
+                        break
+                    except:
+                        continue
+                
+                if server_selector:
+                    if not safe_click(driver, server_selector, assigned_id):
+                        logger.warning(f"[{assigned_id}] ⚠️ Falha ao clicar no server-selector")
+                else:
+                    logger.warning(f"[{assigned_id}] ⚠️ Server-selector não encontrado")
                 
                 time.sleep(2)
                 close_popups(driver, assigned_id)
                 
-            except TimeoutException:
-                logger.error(f"[{assigned_id}] ❌ Server-selector não encontrado")
-                return None
+            except Exception as e:
+                logger.warning(f"[{assigned_id}] ⚠️ Erro com server-selector: {e}")
             
-            # Passo 6: Aguardar 10 segundos
+            # Passo 6: Aguardar
             logger.info(f"[{assigned_id}] 4️⃣ Aguardando 10 segundos...")
             time.sleep(10)
             close_popups(driver, assigned_id)
             
-            # Passo 7: Clicar no player de reprodução
+            # Passo 7: Clicar no player
             logger.info(f"[{assigned_id}] 5️⃣ Procurando player de reprodução...")
-            
-            # Tentar diversos seletores comuns de players
             player_selectors = [
                 'div[class*="player"]',
                 'div[id*="player"]',
                 'video',
                 'iframe[src*="mixdrop"]',
                 '.video-container',
-                '#video-player',
-                'button[class*="play"]'
+                '#video-player'
             ]
             
-            player_clicked = False
             for selector in player_selectors:
                 try:
                     player = WebDriverWait(driver, 5).until(
                         EC.presence_of_element_located((By.CSS_SELECTOR, selector))
                     )
-                    logger.info(f"[{assigned_id}] ✅ Player encontrado: {selector}")
-                    
                     if safe_click(driver, player, assigned_id):
-                        player_clicked = True
                         logger.info(f"[{assigned_id}] ✅ Player clicado")
                         break
                 except:
                     continue
             
-            if not player_clicked:
-                logger.warning(f"[{assigned_id}] ⚠️ Player não encontrado, continuando...")
-            
             time.sleep(3)
             close_popups(driver, assigned_id)
             
-            # Passo 8: Procurar pelo elemento de vídeo com id="videojs_html5_api"
-            logger.info(f"[{assigned_id}] 6️⃣ Procurando elemento de vídeo (id=videojs_html5_api)...")
+            # Passo 8: Buscar URL do vídeo
+            logger.info(f"[{assigned_id}] 6️⃣ Procurando elemento de vídeo...")
             
             max_wait = 30
             start_search = time.time()
@@ -407,17 +460,14 @@ def extract_video_from_wizercdn(url, driver_id, timeout=60):
             
             while time.time() - start_search < max_wait:
                 try:
-                    # Fechar popups constantemente
                     close_popups(driver, assigned_id)
                     
-                    # Buscar vídeo pelo ID específico
                     video_url = driver.execute_script("""
                         var video = document.getElementById('videojs_html5_api');
                         if (video && video.src) {
                             return video.src;
                         }
                         
-                        // Fallback: procurar qualquer vídeo com src válida
                         var videos = document.querySelectorAll('video');
                         for (var i = 0; i < videos.length; i++) {
                             if (videos[i].src && (videos[i].src.includes('.mp4') || 
@@ -432,8 +482,7 @@ def extract_video_from_wizercdn(url, driver_id, timeout=60):
                     
                     if video_url:
                         elapsed = time.time() - start_time
-                        logger.info(f"[{assigned_id}] ✅ URL do vídeo encontrada em {elapsed:.2f}s!")
-                        logger.info(f"[{assigned_id}] URL: {video_url[:100]}...")
+                        logger.info(f"[{assigned_id}] ✅ URL encontrada em {elapsed:.2f}s!")
                         return video_url
                     
                     time.sleep(2)
@@ -442,7 +491,7 @@ def extract_video_from_wizercdn(url, driver_id, timeout=60):
                     logger.debug(f"[{assigned_id}] Erro na busca: {e}")
                     time.sleep(2)
             
-            logger.error(f"[{assigned_id}] ❌ URL do vídeo não encontrada após {max_wait}s")
+            logger.error(f"[{assigned_id}] ❌ URL não encontrada após {max_wait}s")
             return None
             
     except Exception as e:
@@ -468,6 +517,12 @@ def extract_with_retry(url, max_retries=2):
 # Thread pool
 thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=5, thread_name_prefix="WizerExtractor")
 
+# Baixar uBlock Origin na inicialização
+download_ublock_origin()
+
+# Pool global
+driver_pool = DriverPool(max_size=6, max_concurrent=5)
+
 @app.route('/extrair', methods=['GET'])
 def extrair_video():
     """Endpoint principal de extração"""
@@ -487,31 +542,29 @@ def extrair_video():
         if not is_valid_wizercdn_url(target_url):
             return jsonify({
                 'success': False,
-                'error': 'URL deve ser do domínio warezcdn.com',
+                'error': 'URL deve ser do domínio warezcdn.cc',
                 'request_id': request_id
             }), 400
         
         logger.info(f"[{request_id}] 🚀 Nova requisição: {target_url}")
         
-        # Verificar disponibilidade
         stats = driver_pool.get_stats()
         if stats['available_slots'] <= 0:
             return jsonify({
                 'success': False,
-                'error': 'Servidor ocupado. Tente novamente em alguns segundos.',
+                'error': 'Servidor ocupado. Tente novamente.',
                 'request_id': request_id
             }), 503
         
-        # Executar extração
         try:
             future = thread_pool.submit(extract_with_retry, target_url, 2)
-            video_url = future.result(timeout=90)
+            video_url = future.result(timeout=120)
             
         except concurrent.futures.TimeoutError:
-            logger.error(f"[{request_id}] Timeout total da operação")
+            logger.error(f"[{request_id}] Timeout")
             return jsonify({
                 'success': False,
-                'error': 'Timeout na operação. Tente novamente.',
+                'error': 'Timeout na operação',
                 'request_id': request_id
             }), 408
         
@@ -548,13 +601,15 @@ def extrair_video():
 def health():
     """Health check"""
     stats = driver_pool.get_stats()
+    ublock_status = "✅ Instalado" if os.path.exists(UBLOCK_XPI) else "❌ Não instalado"
     
     return jsonify({
         'status': 'OK',
         'service': 'Wizercdn + Mixdrop Extractor',
+        'ublock_origin': ublock_status,
         'pool_stats': stats,
         'features': [
-            'Bloqueadores agressivos de popups',
+            '🛡️ uBlock Origin integrado',
             'Suporte a 5 extrações simultâneas',
             'Auto-retry em caso de falha',
             'Proteção contra interceptação de cliques'
@@ -564,25 +619,28 @@ def health():
 @app.route('/', methods=['GET'])
 def index():
     """Página inicial"""
+    ublock_status = "✅ Instalado" if os.path.exists(UBLOCK_XPI) else "❌ Não instalado"
+    
     return jsonify({
         'service': 'API de Extração Wizercdn + Mixdrop 🎬',
-        'version': '1.0',
+        'version': '2.0',
         'provider': 'Wizercdn (Mixdrop)',
+        'ublock_origin': ublock_status,
         'endpoints': {
             '/extrair?url=<URL>': 'Extrair URL de vídeo',
             '/health': 'Status da API',
             '/': 'Esta página'
         },
         'url_format': {
-            'movie': 'https://embed.warezcdn.com/filme/{imdb_id}',
-            'tv': 'https://embed.warezcdn.com/serie/{imdb_id}/{season}/{episode}'
+            'movie': 'https://embed.warezcdn.cc/filme/{imdb_id}',
+            'tv': 'https://embed.warezcdn.cc/serie/{imdb_id}/{season}/{episode}'
         },
-        'example': 'http://localhost:5000/extrair?url=https://embed.warezcdn.com/filme/tt1234567',
+        'example': 'http://localhost:5000/extrair?url=https://embed.warezcdn.cc/filme/tt1234567',
         'features': [
-            '✅ Bloqueio agressivo de popups',
+            '🛡️ uBlock Origin integrado',
+            '✅ Bloqueio automático de anúncios',
             '✅ Seleção automática Mixdrop + Lang=2',
-            '✅ Cliques protegidos contra interceptação',
-            '✅ Retry automático',
+            '✅ Cliques protegidos',
             '✅ Pool de drivers otimizado'
         ]
     })
@@ -618,8 +676,13 @@ atexit.register(cleanup)
 if __name__ == "__main__":
     print("🎬 API de Extração Wizercdn + Mixdrop")
     print("=" * 50)
-    print("\n🔧 Recursos:")
-    print("  • Bloqueadores agressivos de popups")
+    print("\n🛡️ uBlock Origin:")
+    if os.path.exists(UBLOCK_XPI):
+        print("  ✅ Instalado e ativo")
+    else:
+        print("  ⚠️ Não encontrado - baixando...")
+    print("\n📧 Recursos:")
+    print("  • uBlock Origin para bloqueio de anúncios")
     print("  • Seleção automática: Mixdrop + Lang=2")
     print("  • Cliques protegidos contra interceptação")
     print("  • Pool de drivers otimizado (5 simultâneas)")
@@ -627,10 +690,10 @@ if __name__ == "__main__":
     print("\n🎯 Endpoint:")
     print("  GET /extrair?url=<URL>")
     print("\n📋 Formato de URL:")
-    print("  Filme:  https://embed.warezcdn.com/filme/{imdb_id}")
-    print("  Série:  https://embed.warezcdn.com/serie/{imdb_id}/{season}/{episode}")
+    print("  Filme:  https://embed.warezcdn.cc/filme/{imdb_id}")
+    print("  Série:  https://embed.warezcdn.cc/serie/{imdb_id}/{season}/{episode}")
     print("\n💡 Exemplo:")
-    print("  http://localhost:5000/extrair?url=https://embed.warezcdn.com/filme/tt1234567")
+    print("  http://localhost:5000/extrair?url=https://embed.warezcdn.cc/filme/tt1234567")
     print("\n🚀 Iniciando servidor em http://0.0.0.0:5000")
     print("=" * 50)
     
