@@ -15,6 +15,7 @@ from webdriver_manager.firefox import GeckoDriverManager
 import uuid
 import os
 import requests
+from pathlib import Path
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -27,9 +28,15 @@ logging.getLogger('urllib3').setLevel(logging.ERROR)
 app = Flask(__name__)
 CORS(app)
 
-# Diretório para extensões
+# Diretórios
 EXTENSIONS_DIR = os.path.join(os.getcwd(), 'extensions')
+DOWNLOADS_DIR = os.path.join(os.getcwd(), 'downloads')
 UBLOCK_XPI = os.path.join(EXTENSIONS_DIR, 'ublock_origin.xpi')
+
+# Criar diretório de downloads
+if not os.path.exists(DOWNLOADS_DIR):
+    os.makedirs(DOWNLOADS_DIR)
+    logger.info(f"Diretório de downloads criado: {DOWNLOADS_DIR}")
 
 def download_ublock_origin():
     """Baixa a extensão uBlock Origin se não existir"""
@@ -121,11 +128,9 @@ def is_valid_wizercdn_url(url):
 def mouse_click(driver, element, driver_id):
     """Clica em elemento emulando comportamento real do mouse"""
     try:
-        # Scroll suave para o elemento
         driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", element)
         time.sleep(0.5)
         
-        # Usar ActionChains para emular movimento real do mouse
         actions = ActionChains(driver)
         actions.move_to_element(element).pause(0.3).click().perform()
         logger.info(f"[{driver_id}] Clique com ActionChains executado")
@@ -149,11 +154,8 @@ def click_center_page(driver, driver_id):
         center_x = width // 2
         center_y = height // 2
         
-        # Usar ActionChains para mover o mouse e clicar
         actions = ActionChains(driver)
         actions.move_by_offset(center_x, center_y).pause(0.3).click().perform()
-        
-        # Reset da posição do mouse
         actions.move_by_offset(-center_x, -center_y).perform()
         
         logger.info(f"[{driver_id}] Clique no centro da página ({center_x}, {center_y})")
@@ -225,8 +227,71 @@ def wait_for_video_playing(driver, driver_id, max_wait=15):
     logger.warning(f"[{driver_id}] Timeout aguardando vjs-playing")
     return False
 
-def extract_video_from_wizercdn(url, driver_id):
-    """Extrai URL do vídeo do Wizercdn"""
+def download_video(video_url, driver_id, filename=None):
+    """Faz download do vídeo usando requests"""
+    try:
+        if not filename:
+            # Gerar nome do arquivo baseado no timestamp
+            timestamp = int(time.time())
+            filename = f"video_{timestamp}.mp4"
+        
+        filepath = os.path.join(DOWNLOADS_DIR, filename)
+        
+        logger.info(f"[{driver_id}] Iniciando download: {video_url[:80]}...")
+        
+        # Headers para simular navegador
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0',
+            'Accept': '*/*',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Referer': 'https://mixdrop.co/',
+            'Origin': 'https://mixdrop.co'
+        }
+        
+        # Stream download para arquivos grandes
+        response = requests.get(video_url, headers=headers, stream=True, timeout=60)
+        response.raise_for_status()
+        
+        total_size = int(response.headers.get('content-length', 0))
+        logger.info(f"[{driver_id}] Tamanho do arquivo: {total_size / (1024*1024):.2f} MB")
+        
+        downloaded_size = 0
+        chunk_size = 1024 * 1024  # 1MB chunks
+        
+        with open(filepath, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=chunk_size):
+                if chunk:
+                    f.write(chunk)
+                    downloaded_size += len(chunk)
+                    
+                    # Log de progresso a cada 10MB
+                    if downloaded_size % (10 * 1024 * 1024) < chunk_size:
+                        progress = (downloaded_size / total_size * 100) if total_size > 0 else 0
+                        logger.info(f"[{driver_id}] Progresso: {progress:.1f}% ({downloaded_size/(1024*1024):.1f}MB)")
+        
+        logger.info(f"[{driver_id}] Download concluído: {filepath}")
+        return {
+            'success': True,
+            'filepath': filepath,
+            'filename': filename,
+            'size_mb': downloaded_size / (1024 * 1024)
+        }
+        
+    except requests.exceptions.RequestException as e:
+        logger.error(f"[{driver_id}] Erro no download: {e}")
+        return {
+            'success': False,
+            'error': str(e)
+        }
+    except Exception as e:
+        logger.error(f"[{driver_id}] Erro inesperado no download: {e}")
+        return {
+            'success': False,
+            'error': str(e)
+        }
+
+def extract_and_download_video(url, driver_id):
+    """Extrai URL do vídeo e faz download"""
     start_time = time.time()
     driver = None
     
@@ -382,21 +447,19 @@ def extract_video_from_wizercdn(url, driver_id):
             logger.info(f"[{driver_id}] Tentativa {attempt + 1} de clicar no player")
             
             if try_click_player(driver, driver_id):
-                # Aguardar e verificar se começou a reproduzir
                 if wait_for_video_playing(driver, driver_id, max_wait=10):
                     video_playing = True
                     logger.info(f"[{driver_id}] Vídeo reproduzindo após tentativa {attempt + 1}")
-                    # Aguardar 10 segundos após o vídeo começar a reproduzir
                     logger.info(f"[{driver_id}] Aguardando 10 segundos após início da reprodução...")
                     time.sleep(10)
                     break
                 else:
-                    logger.warning(f"[{driver_id}] Vídeo não reproduziu após tentativa {attempt + 1}, tentando próxima estratégia...")
+                    logger.warning(f"[{driver_id}] Vídeo não reproduziu após tentativa {attempt + 1}")
             
             time.sleep(2)
         
         if not video_playing:
-            logger.warning(f"[{driver_id}] Vídeo não começou a reproduzir após todas as tentativas")
+            logger.warning(f"[{driver_id}] Vídeo não começou a reproduzir")
         
         # Passo 8: Buscar URL do vídeo
         logger.info(f"[{driver_id}] 8. Procurando URL do vídeo...")
@@ -434,7 +497,7 @@ def extract_video_from_wizercdn(url, driver_id):
                 if video_url and len(video_url) > 10 and ('http' in video_url or '//' in video_url):
                     elapsed = time.time() - start_time
                     logger.info(f"[{driver_id}] URL encontrada em {elapsed:.2f}s")
-                    return video_url
+                    break
                 
                 time.sleep(2)
                 
@@ -442,8 +505,18 @@ def extract_video_from_wizercdn(url, driver_id):
                 logger.debug(f"[{driver_id}] Erro na busca: {e}")
                 time.sleep(2)
         
-        logger.error(f"[{driver_id}] URL não encontrada após {max_wait}s")
-        return None
+        if not video_url:
+            logger.error(f"[{driver_id}] URL não encontrada")
+            return None
+        
+        # Passo 9: Fazer download do vídeo
+        logger.info(f"[{driver_id}] 9. Iniciando download do vídeo...")
+        download_result = download_video(video_url, driver_id)
+        
+        return {
+            'video_url': video_url,
+            'download': download_result
+        }
         
     except Exception as e:
         logger.error(f"[{driver_id}] Erro durante extração: {e}")
@@ -466,7 +539,7 @@ def extract_with_retry(url, max_retries=2):
             logger.info(f"[{session_id}] Tentativa {attempt + 1} de {max_retries}")
             time.sleep(2)
         
-        result = extract_video_from_wizercdn(url, session_id)
+        result = extract_and_download_video(url, session_id)
         if result:
             return result
     
@@ -478,7 +551,7 @@ download_ublock_origin()
 
 @app.route('/extrair', methods=['GET'])
 def extrair_video():
-    """Endpoint principal de extração"""
+    """Endpoint principal de extração e download"""
     start_time = time.time()
     request_id = str(uuid.uuid4())[:8]
     
@@ -501,14 +574,15 @@ def extrair_video():
         
         logger.info(f"[{request_id}] Nova requisição: {target_url}")
         
-        video_url = extract_with_retry(target_url, 2)
+        result = extract_with_retry(target_url, 2)
         elapsed_time = time.time() - start_time
         
-        if video_url:
+        if result and result.get('download', {}).get('success'):
             logger.info(f"[{request_id}] Sucesso em {elapsed_time:.2f}s")
             return jsonify({
                 'success': True,
-                'video_url': video_url,
+                'video_url': result.get('video_url'),
+                'download': result.get('download'),
                 'processamento_tempo': f"{elapsed_time:.2f}s",
                 'request_id': request_id
             }), 200
@@ -516,7 +590,8 @@ def extrair_video():
             logger.error(f"[{request_id}] Falha em {elapsed_time:.2f}s")
             return jsonify({
                 'success': False,
-                'error': 'Não foi possível extrair a URL do vídeo',
+                'error': 'Não foi possível extrair e baixar o vídeo',
+                'result': result,
                 'processamento_tempo': f"{elapsed_time:.2f}s",
                 'request_id': request_id
             }), 404
@@ -538,14 +613,17 @@ def health():
     
     return jsonify({
         'status': 'OK',
-        'service': 'Wizercdn + Mixdrop Extractor',
+        'service': 'Wizercdn + Mixdrop Extractor & Downloader',
         'ublock_origin': ublock_status,
+        'downloads_dir': DOWNLOADS_DIR,
         'features': [
             'uBlock Origin integrado',
             'Cliques com emulação de mouse',
             'Verificação de reprodução (vjs-playing)',
             '3 estratégias de clique com retry',
-            'Extração via currentSrc'
+            'Extração via currentSrc',
+            'Download automático do vídeo',
+            'Progress logging durante download'
         ]
     }), 200
 
@@ -555,12 +633,13 @@ def index():
     ublock_status = "Instalado" if os.path.exists(UBLOCK_XPI) else "Não instalado"
     
     return jsonify({
-        'service': 'API de Extração Wizercdn + Mixdrop',
-        'version': '3.0',
+        'service': 'API de Extração e Download Wizercdn + Mixdrop',
+        'version': '4.0',
         'provider': 'Wizercdn (Mixdrop)',
         'ublock_origin': ublock_status,
+        'downloads_dir': DOWNLOADS_DIR,
         'endpoints': {
-            '/extrair?url=<URL>': 'Extrair URL de vídeo',
+            '/extrair?url=<URL>': 'Extrair e baixar vídeo',
             '/health': 'Status da API',
             '/': 'Esta página'
         },
@@ -572,19 +651,22 @@ def index():
     })
 
 if __name__ == "__main__":
-    print("API de Extração Wizercdn + Mixdrop")
-    print("=" * 50)
+    print("API de Extração e Download Wizercdn + Mixdrop")
+    print("=" * 60)
     print("\nRecursos:")
     print("  - uBlock Origin integrado")
     print("  - Cliques com ActionChains (emulação real de mouse)")
     print("  - 10s de espera antes de clicar no player")
     print("  - Verificação de vjs-playing")
     print("  - 3 estratégias de clique com retry")
+    print("  - Download automático do vídeo")
+    print("  - Progress logging (a cada 10MB)")
     print("  - Sem pool (menor consumo de memória)")
+    print(f"\nDiretório de downloads: {DOWNLOADS_DIR}")
     print("\nEndpoint:")
     print("  GET /extrair?url=<URL>")
     print("\nIniciando servidor em http://0.0.0.0:5000")
-    print("=" * 50)
+    print("=" * 60)
     
     app.run(
         host='0.0.0.0',

@@ -27,9 +27,10 @@ logging.getLogger('urllib3').setLevel(logging.ERROR)
 app = Flask(__name__)
 CORS(app)
 
-# Diretório para extensões
+# Diretórios
 EXTENSIONS_DIR = os.path.join(os.getcwd(), 'extensions')
 UBLOCK_XPI = os.path.join(EXTENSIONS_DIR, 'ublock_origin.xpi')
+VIDEO_FINDER_XPI = os.path.join(EXTENSIONS_DIR, 'find-video-addon.xpi')
 
 def download_ublock_origin():
     """Baixa a extensão uBlock Origin se não existir"""
@@ -59,11 +60,21 @@ def download_ublock_origin():
         logger.warning("Continuando sem uBlock Origin...")
         return False
 
-def criar_navegador_firefox_com_ublock():
-    """Cria navegador Firefox com uBlock Origin"""
+def check_video_finder_extension():
+    """Verifica se a extensão find-video-addon.xpi existe"""
+    if os.path.exists(VIDEO_FINDER_XPI):
+        logger.info(f"Extensão Video Finder encontrada: {VIDEO_FINDER_XPI}")
+        return True
+    else:
+        logger.error(f"ERRO: Extensão Video Finder NÃO encontrada em: {VIDEO_FINDER_XPI}")
+        logger.error("Por favor, coloque o arquivo 'find-video-addon.xpi' na pasta 'extensions/'")
+        return False
+
+def criar_navegador_firefox_com_extensions():
+    """Cria navegador Firefox com uBlock Origin e Video Finder"""
     options = Options()
     
-    # options.add_argument("--headless")
+    # options.add_argument("--headless")  # Comentado para debug
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
@@ -76,6 +87,7 @@ def criar_navegador_firefox_com_ublock():
     options.set_preference("dom.webdriver.enabled", False)
     options.set_preference("useAutomationExtension", False)
     
+    # Desabilitar cache
     options.set_preference("browser.cache.disk.enable", False)
     options.set_preference("browser.cache.memory.enable", False)
     options.set_preference("network.http.use-cache", False)
@@ -92,6 +104,18 @@ def criar_navegador_firefox_com_ublock():
         
         driver = webdriver.Firefox(service=service, options=options)
         
+        # Instalar Video Finder PRIMEIRO (mais importante)
+        if os.path.exists(VIDEO_FINDER_XPI):
+            try:
+                driver.install_addon(VIDEO_FINDER_XPI, temporary=True)
+                logger.info("Video Finder instalado")
+                time.sleep(2)
+            except Exception as e:
+                logger.warning(f"Erro ao instalar Video Finder: {e}")
+        else:
+            logger.warning("Video Finder não encontrado, continuando sem ele...")
+        
+        # Instalar uBlock Origin
         if os.path.exists(UBLOCK_XPI):
             try:
                 driver.install_addon(UBLOCK_XPI, temporary=True)
@@ -103,7 +127,7 @@ def criar_navegador_firefox_com_ublock():
         driver.set_page_load_timeout(30)
         driver.implicitly_wait(5)
         
-        logger.info("Driver Firefox criado")
+        logger.info("Driver Firefox criado com extensões")
         return driver
         
     except Exception as e:
@@ -121,11 +145,9 @@ def is_valid_wizercdn_url(url):
 def mouse_click(driver, element, driver_id):
     """Clica em elemento emulando comportamento real do mouse"""
     try:
-        # Scroll suave para o elemento
         driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", element)
         time.sleep(0.5)
         
-        # Usar ActionChains para emular movimento real do mouse
         actions = ActionChains(driver)
         actions.move_to_element(element).pause(0.3).click().perform()
         logger.info(f"[{driver_id}] Clique com ActionChains executado")
@@ -149,11 +171,8 @@ def click_center_page(driver, driver_id):
         center_x = width // 2
         center_y = height // 2
         
-        # Usar ActionChains para mover o mouse e clicar
         actions = ActionChains(driver)
         actions.move_by_offset(center_x, center_y).pause(0.3).click().perform()
-        
-        # Reset da posição do mouse
         actions.move_by_offset(-center_x, -center_y).perform()
         
         logger.info(f"[{driver_id}] Clique no centro da página ({center_x}, {center_y})")
@@ -205,7 +224,7 @@ def try_click_player(driver, driver_id):
     return False
 
 def wait_for_video_playing(driver, driver_id, max_wait=15):
-    """Aguarda o vídeo começar a reproduzir (classe vjs-playing)"""
+    """Aguarda o vídeo começar a reproduzir"""
     logger.info(f"[{driver_id}] Aguardando vídeo começar a reproduzir...")
     start_wait = time.time()
     
@@ -225,13 +244,42 @@ def wait_for_video_playing(driver, driver_id, max_wait=15):
     logger.warning(f"[{driver_id}] Timeout aguardando vjs-playing")
     return False
 
+def get_video_urls_from_extension(driver, driver_id, max_wait=30):
+    """Obtém URLs de vídeo capturadas pela extensão Video Finder"""
+    logger.info(f"[{driver_id}] Aguardando extensão capturar URLs de vídeo...")
+    start_time = time.time()
+    
+    while time.time() - start_time < max_wait:
+        try:
+            # Pegar URLs do window.__FOUND_VIDEO_URLS
+            urls = driver.execute_script("return window.__FOUND_VIDEO_URLS || []")
+            
+            if urls and len(urls) > 0:
+                logger.info(f"[{driver_id}] Extensão capturou {len(urls)} URL(s)")
+                
+                # Log de todas as URLs encontradas
+                for i, url in enumerate(urls):
+                    logger.info(f"[{driver_id}]   URL {i+1}: {url[:100]}...")
+                
+                # Retornar a primeira URL (geralmente a principal)
+                return urls[0]
+            
+            time.sleep(2)
+            
+        except Exception as e:
+            logger.debug(f"[{driver_id}] Erro ao ler window.__FOUND_VIDEO_URLS: {e}")
+            time.sleep(2)
+    
+    logger.error(f"[{driver_id}] Timeout: extensão não capturou nenhuma URL após {max_wait}s")
+    return None
+
 def extract_video_from_wizercdn(url, driver_id):
-    """Extrai URL do vídeo do Wizercdn"""
+    """Extrai URL do vídeo do Wizercdn usando extensão Video Finder"""
     start_time = time.time()
     driver = None
     
     try:
-        driver = criar_navegador_firefox_com_ublock()
+        driver = criar_navegador_firefox_com_extensions()
         logger.info(f"[{driver_id}] Iniciando extração: {url}")
         
         # Passo 1: Navegar
@@ -296,7 +344,7 @@ def extract_video_from_wizercdn(url, driver_id):
                     continue
             
             if server_selector:
-                if not mouse_click(driver, server_selector, driver_id):
+                if not mouse_click(server_selector, driver_id):
                     logger.warning(f"[{driver_id}] Falha ao clicar no server-selector")
             else:
                 logger.warning(f"[{driver_id}] Server-selector não encontrado")
@@ -370,11 +418,11 @@ def extract_video_from_wizercdn(url, driver_id):
             logger.error(f"[{driver_id}] Erro ao processar iframes: {e}")
             return None
         
-        # Passo 6: Aguardar player processar (10 segundos)
+        # Passo 6: Aguardar player processar
         logger.info(f"[{driver_id}] 6. Aguardando 10 segundos para o player processar...")
         time.sleep(10)
         
-        # Passo 7: Tentar clicar no player até funcionar
+        # Passo 7: Clicar no player
         logger.info(f"[{driver_id}] 7. Tentando clicar no player...")
         video_playing = False
         
@@ -382,67 +430,34 @@ def extract_video_from_wizercdn(url, driver_id):
             logger.info(f"[{driver_id}] Tentativa {attempt + 1} de clicar no player")
             
             if try_click_player(driver, driver_id):
-                # Aguardar e verificar se começou a reproduzir
                 if wait_for_video_playing(driver, driver_id, max_wait=10):
                     video_playing = True
                     logger.info(f"[{driver_id}] Vídeo reproduzindo após tentativa {attempt + 1}")
-                    # Aguardar 10 segundos após o vídeo começar a reproduzir
-                    logger.info(f"[{driver_id}] Aguardando 10 segundos após início da reprodução...")
-                    time.sleep(10)
                     break
-                else:
-                    logger.warning(f"[{driver_id}] Vídeo não reproduziu após tentativa {attempt + 1}, tentando próxima estratégia...")
             
             time.sleep(2)
         
         if not video_playing:
-            logger.warning(f"[{driver_id}] Vídeo não começou a reproduzir após todas as tentativas")
+            logger.warning(f"[{driver_id}] Vídeo não começou a reproduzir")
         
-        # Passo 8: Buscar URL do vídeo
-        logger.info(f"[{driver_id}] 8. Procurando URL do vídeo...")
+        # Passo 8: Aguardar extensão capturar URLs (IMPORTANTE: dar tempo)
+        logger.info(f"[{driver_id}] 8. Aguardando extensão capturar URLs...")
+        time.sleep(5)  # Aguardar requisições acontecerem
         
-        max_wait = 30
-        start_search = time.time()
-        video_url = None
+        # Voltar ao contexto principal para acessar window.__FOUND_VIDEO_URLS
+        driver.switch_to.default_content()
+        logger.info(f"[{driver_id}] Voltou ao contexto principal")
         
-        while time.time() - start_search < max_wait:
-            try:
-                video_url = driver.execute_script("""
-                    var video = document.getElementById('videojs_html5_api');
-                    if (video) {
-                        if (video.currentSrc) {
-                            return video.currentSrc;
-                        }
-                        if (video.src) {
-                            return video.src;
-                        }
-                    }
-                    
-                    var videos = document.querySelectorAll('video');
-                    for (var i = 0; i < videos.length; i++) {
-                        if (videos[i].currentSrc) {
-                            return videos[i].currentSrc;
-                        }
-                        if (videos[i].src) {
-                            return videos[i].src;
-                        }
-                    }
-                    
-                    return null;
-                """)
-                
-                if video_url and len(video_url) > 10 and ('http' in video_url or '//' in video_url):
-                    elapsed = time.time() - start_time
-                    logger.info(f"[{driver_id}] URL encontrada em {elapsed:.2f}s")
-                    return video_url
-                
-                time.sleep(2)
-                
-            except Exception as e:
-                logger.debug(f"[{driver_id}] Erro na busca: {e}")
-                time.sleep(2)
+        # Passo 9: Obter URLs da extensão
+        logger.info(f"[{driver_id}] 9. Obtendo URLs capturadas pela extensão...")
+        video_url = get_video_urls_from_extension(driver, driver_id, max_wait=30)
         
-        logger.error(f"[{driver_id}] URL não encontrada após {max_wait}s")
+        if video_url:
+            elapsed = time.time() - start_time
+            logger.info(f"[{driver_id}] URL capturada em {elapsed:.2f}s")
+            return video_url
+        
+        logger.error(f"[{driver_id}] URL não capturada")
         return None
         
     except Exception as e:
@@ -473,8 +488,9 @@ def extract_with_retry(url, max_retries=2):
     logger.error(f"[{session_id}] Todas as tentativas falharam")
     return None
 
-# Baixar uBlock Origin na inicialização
+# Inicialização
 download_ublock_origin()
+check_video_finder_extension()
 
 @app.route('/extrair', methods=['GET'])
 def extrair_video():
@@ -498,6 +514,15 @@ def extrair_video():
                 'error': 'URL deve ser do domínio warezcdn.cc',
                 'request_id': request_id
             }), 400
+        
+        # Verificar se extensão existe
+        if not os.path.exists(VIDEO_FINDER_XPI):
+            return jsonify({
+                'success': False,
+                'error': f'Extensão Video Finder não encontrada em: {VIDEO_FINDER_XPI}',
+                'help': 'Coloque o arquivo find-video-addon.xpi na pasta extensions/',
+                'request_id': request_id
+            }), 500
         
         logger.info(f"[{request_id}] Nova requisição: {target_url}")
         
@@ -535,17 +560,20 @@ def extrair_video():
 def health():
     """Health check"""
     ublock_status = "Instalado" if os.path.exists(UBLOCK_XPI) else "Não instalado"
+    video_finder_status = "Instalado" if os.path.exists(VIDEO_FINDER_XPI) else "NÃO ENCONTRADO"
     
     return jsonify({
-        'status': 'OK',
-        'service': 'Wizercdn + Mixdrop Extractor',
+        'status': 'OK' if os.path.exists(VIDEO_FINDER_XPI) else 'WARNING',
+        'service': 'Wizercdn + Mixdrop Extractor (Video Finder Extension)',
         'ublock_origin': ublock_status,
+        'video_finder_extension': video_finder_status,
+        'video_finder_path': VIDEO_FINDER_XPI,
         'features': [
             'uBlock Origin integrado',
-            'Cliques com emulação de mouse',
-            'Verificação de reprodução (vjs-playing)',
-            '3 estratégias de clique com retry',
-            'Extração via currentSrc'
+            'Extensão Video Finder customizada',
+            'Captura automática via window.__FOUND_VIDEO_URLS',
+            'Interceptação de requisições de vídeo',
+            'Zero dependência de seletores CSS'
         ]
     }), 200
 
@@ -553,12 +581,21 @@ def health():
 def index():
     """Página inicial"""
     ublock_status = "Instalado" if os.path.exists(UBLOCK_XPI) else "Não instalado"
+    video_finder_status = "Instalado" if os.path.exists(VIDEO_FINDER_XPI) else "NÃO ENCONTRADO"
     
     return jsonify({
         'service': 'API de Extração Wizercdn + Mixdrop',
-        'version': '3.0',
+        'version': '8.0 - Custom Video Finder Extension',
         'provider': 'Wizercdn (Mixdrop)',
         'ublock_origin': ublock_status,
+        'video_finder_extension': video_finder_status,
+        'strategy': 'Extensão customizada que intercepta URLs de vídeo',
+        'extension_path': VIDEO_FINDER_XPI,
+        'setup': {
+            'step1': 'Coloque find-video-addon.xpi na pasta extensions/',
+            'step2': 'Execute o servidor',
+            'step3': 'Faça requisições para /extrair'
+        },
         'endpoints': {
             '/extrair?url=<URL>': 'Extrair URL de vídeo',
             '/health': 'Status da API',
@@ -572,15 +609,35 @@ def index():
     })
 
 if __name__ == "__main__":
-    print("API de Extração Wizercdn + Mixdrop")
+    print("API de Extração Wizercdn + Mixdrop v8.0")
     print("=" * 50)
+    print("\nESTRATÉGIA: Extensão Video Finder Customizada")
+    print("\nSetup:")
+    print(f"  1. Coloque 'find-video-addon.xpi' em: {EXTENSIONS_DIR}")
+    print("  2. A extensão será carregada automaticamente")
+    print("  3. URLs serão capturadas via window.__FOUND_VIDEO_URLS")
+    print("\nFluxo de Extração:")
+    print("  1. Carrega extensão Video Finder")
+    print("  2. Navega para página do Wizercdn")
+    print("  3. Clica audio-selector e server-selector")
+    print("  4. Entra nos iframes")
+    print("  5. Clica play no vídeo")
+    print("  6. Aguarda 5s (requisições acontecem)")
+    print("  7. Lê window.__FOUND_VIDEO_URLS da extensão")
+    print("  8. Retorna primeira URL encontrada")
     print("\nRecursos:")
-    print("  - uBlock Origin integrado")
-    print("  - Cliques com ActionChains (emulação real de mouse)")
-    print("  - 10s de espera antes de clicar no player")
-    print("  - Verificação de vjs-playing")
-    print("  - 3 estratégias de clique com retry")
-    print("  - Sem pool (menor consumo de memória)")
+    print("  - uBlock Origin (anti-anúncios)")
+    print("  - Video Finder (captura URLs)")
+    print("  - Interceptação automática de requisições")
+    print("  - Zero dependência de DOM/seletores")
+    print("\nStatus das Extensões:")
+    print(f"  - uBlock Origin: {'✓ OK' if os.path.exists(UBLOCK_XPI) else '✗ Não encontrado'}")
+    print(f"  - Video Finder: {'✓ OK' if os.path.exists(VIDEO_FINDER_XPI) else '✗ NÃO ENCONTRADO'}")
+    
+    if not os.path.exists(VIDEO_FINDER_XPI):
+        print("\n⚠️  ATENÇÃO: Extensão Video Finder NÃO encontrada!")
+        print(f"   Coloque 'find-video-addon.xpi' em: {VIDEO_FINDER_XPI}")
+    
     print("\nEndpoint:")
     print("  GET /extrair?url=<URL>")
     print("\nIniciando servidor em http://0.0.0.0:5000")
