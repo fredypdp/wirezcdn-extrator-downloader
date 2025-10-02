@@ -232,7 +232,6 @@ def extrair_url_video(url, driver_id):
         logger.info(f"[{driver_id}] 2. Procurando audio-selector (mixdrop, lang=2)...")
         try:
             audio_selectors = [
-                'audio-selector[data-servers="mixdrop"][data-lang="2"]',
                 'audio-selector[data-lang="2"]',
             ]
             
@@ -263,7 +262,8 @@ def extrair_url_video(url, driver_id):
         logger.info(f"[{driver_id}] 3. Procurando server-selector (mixdrop, lang=2)...")
         try:
             server_selectors = [
-                'server-selector[data-lang="2"]',
+                'server-selector[data-server="mixdrop"][data-lang="2"]',
+                'server-selector[data-lang="2"]'
             ]
             
             server_selector = None

@@ -2,6 +2,7 @@ import time
 import logging
 import re
 import os
+import json
 from urllib.parse import urlparse
 from pathlib import Path
 from flask import Flask, request, jsonify
@@ -23,11 +24,30 @@ CORS(app)
 
 # Diretórios
 DOWNLOADS_DIR = os.path.join(os.getcwd(), 'downloads')
+URLS_FILE = 'filmes_warezcdn_url.json'
 
 # Criar diretório de downloads
 if not os.path.exists(DOWNLOADS_DIR):
     os.makedirs(DOWNLOADS_DIR)
     logger.info(f"Diretório de downloads criado: {DOWNLOADS_DIR}")
+
+def load_urls_from_file():
+    """Carrega URLs do arquivo JSON"""
+    try:
+        if not os.path.exists(URLS_FILE):
+            logger.error(f"Arquivo {URLS_FILE} não encontrado")
+            return None
+        
+        with open(URLS_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        urls = data.get('urls', [])
+        # Pegar apenas as 2 primeiras URLs
+        return urls[:2]
+        
+    except Exception as e:
+        logger.error(f"Erro ao carregar arquivo de URLs: {e}")
+        return None
 
 def parse_url_info(url):
     """Extrai informações da URL (tipo, id, temporada, episódio)"""
@@ -87,14 +107,6 @@ def get_download_path(url_info):
         'filename': filename,
         'filepath': os.path.join(folder, filename)
     }
-
-def is_valid_warezcdn_url(url):
-    """Valida URL do Warezcdn"""
-    try:
-        parsed = urlparse(url)
-        return 'warezcdn.cc' in parsed.netloc.lower() or 'embed.warezcdn.cc' in parsed.netloc.lower()
-    except:
-        return False
 
 def cleanup_failed_download(filepath, driver_id):
     """Remove arquivo em caso de falha"""
@@ -171,14 +183,15 @@ def download_video(video_url, driver_id, filepath):
         }
 
 def extract_and_download(url, driver_id, download_path_info):
-    """Extrai URL do vídeo e faz download"""
+    """Extrai URL do vídeo e faz download (processamento sequencial)"""
     start_time = time.time()
     filepath = download_path_info['filepath']
     
     try:
         logger.info(f"[{driver_id}] Iniciando processo: {url}")
         
-        # Passo 1: Extrair URL do vídeo
+        # Passo 1: Extrair URL do vídeo (sequencial, um de cada vez)
+        logger.info(f"[{driver_id}] Extraindo URL do vídeo...")
         extraction_result = extrair_url_video(url, driver_id)
         
         if not extraction_result.get('success'):
@@ -186,7 +199,8 @@ def extract_and_download(url, driver_id, download_path_info):
             cleanup_failed_download(filepath, driver_id)
             return {
                 'success': False,
-                'error': extraction_result.get('error', 'Erro na extração')
+                'error': extraction_result.get('error', 'Erro na extração'),
+                'url': url
             }
         
         video_url = extraction_result['video_url']
@@ -200,6 +214,7 @@ def extract_and_download(url, driver_id, download_path_info):
             elapsed = time.time() - start_time
             return {
                 'success': True,
+                'url': url,
                 'video_url': video_url,
                 'filepath': download_result['filepath'],
                 'size_mb': download_result['size_mb'],
@@ -211,6 +226,7 @@ def extract_and_download(url, driver_id, download_path_info):
             cleanup_failed_download(filepath, driver_id)
             return {
                 'success': False,
+                'url': url,
                 'error': download_result.get('error', 'Erro desconhecido no download')
             }
         
@@ -220,14 +236,33 @@ def extract_and_download(url, driver_id, download_path_info):
         cleanup_failed_download(filepath, driver_id)
         return {
             'success': False,
+            'url': url,
             'error': str(e)
         }
 
-def download_with_retry(url, download_path_info, max_retries=2):
-    """Sistema de retry para download"""
+def process_url_with_retry(url, max_retries=2):
+    """Processa uma URL com sistema de retry"""
     session_id = str(uuid.uuid4())[:8]
     
-    # Verificar se o arquivo já existe ANTES de processar
+    # Parse da URL
+    url_info = parse_url_info(url)
+    if not url_info:
+        return {
+            'success': False,
+            'url': url,
+            'error': 'Formato de URL inválido'
+        }
+    
+    # Definir caminho de download
+    download_path_info = get_download_path(url_info)
+    if not download_path_info:
+        return {
+            'success': False,
+            'url': url,
+            'error': 'Não foi possível determinar o caminho de download'
+        }
+    
+    # Verificar se o arquivo já existe
     filepath = download_path_info['filepath']
     if os.path.exists(filepath):
         file_size = os.path.getsize(filepath)
@@ -235,9 +270,11 @@ def download_with_retry(url, download_path_info, max_retries=2):
         logger.info(f"[{session_id}] Arquivo já existe: {filepath} ({size_mb:.2f} MB)")
         return {
             'success': True,
+            'url': url,
             'already_exists': True,
             'filepath': filepath,
             'size_mb': size_mb,
+            'url_info': url_info,
             'message': 'Arquivo já foi baixado anteriormente'
         }
     
@@ -250,96 +287,76 @@ def download_with_retry(url, download_path_info, max_retries=2):
         result = extract_and_download(url, session_id, download_path_info)
         
         if result and result.get('success'):
+            result['url_info'] = url_info
             return result
     
-    logger.error(f"[{session_id}] Todas as tentativas falharam")
+    logger.error(f"[{session_id}] Todas as tentativas falharam para {url}")
     return {
         'success': False,
+        'url': url,
+        'url_info': url_info,
         'error': 'Todas as tentativas de download falharam'
     }
 
 @app.route('/baixar', methods=['GET'])
-def baixar_video():
-    """Endpoint principal de download"""
+def baixar_videos():
+    """Endpoint principal - baixa as 2 primeiras URLs do arquivo JSON"""
     start_time = time.time()
     request_id = str(uuid.uuid4())[:8]
     
     try:
-        target_url = request.args.get('url')
+        logger.info(f"[{request_id}] Iniciando processamento de URLs do arquivo {URLS_FILE}")
         
-        if not target_url:
+        # Carregar URLs do arquivo
+        urls = load_urls_from_file()
+        
+        if urls is None:
             return jsonify({
                 'success': False,
-                'error': 'Parâmetro "url" é obrigatório',
-                'request_id': request_id
-            }), 400
-        
-        if not is_valid_warezcdn_url(target_url):
-            return jsonify({
-                'success': False,
-                'error': 'URL deve ser do domínio warezcdn.cc',
-                'request_id': request_id
-            }), 400
-        
-        # Parse da URL para extrair informações
-        url_info = parse_url_info(target_url)
-        if not url_info:
-            return jsonify({
-                'success': False,
-                'error': 'Formato de URL inválido',
-                'request_id': request_id
-            }), 400
-        
-        # Definir caminho de download
-        download_path_info = get_download_path(url_info)
-        if not download_path_info:
-            return jsonify({
-                'success': False,
-                'error': 'Não foi possível determinar o caminho de download',
+                'error': f'Erro ao carregar arquivo {URLS_FILE}',
                 'request_id': request_id
             }), 500
         
-        logger.info(f"[{request_id}] Nova requisição: {target_url}")
-        logger.info(f"[{request_id}] Tipo: {url_info['type']}, ID: {url_info['id']}")
-        logger.info(f"[{request_id}] Caminho: {download_path_info['filepath']}")
-        
-        result = download_with_retry(target_url, download_path_info, 2)
-        elapsed_time = time.time() - start_time
-        
-        if result.get('success'):
-            logger.info(f"[{request_id}] Download concluído com sucesso em {elapsed_time:.2f}s")
-            
-            response_data = {
-                'success': True,
-                'url_info': url_info,
-                'filepath': result.get('filepath'),
-                'size_mb': result.get('size_mb'),
-                'total_time': f"{elapsed_time:.2f}s",
-                'request_id': request_id
-            }
-            
-            # Adicionar tempo de extração se disponível
-            if result.get('extraction_time'):
-                response_data['extraction_time'] = result.get('extraction_time')
-            
-            # Verificar se o arquivo já existia
-            if result.get('already_exists'):
-                response_data['message'] = 'Arquivo já existe, download não necessário'
-                response_data['already_exists'] = True
-            else:
-                response_data['message'] = 'Download concluído com sucesso'
-                response_data['already_exists'] = False
-            
-            return jsonify(response_data), 200
-        else:
-            logger.error(f"[{request_id}] Falha no download em {elapsed_time:.2f}s")
+        if len(urls) == 0:
             return jsonify({
                 'success': False,
-                'error': result.get('error', 'Erro desconhecido'),
-                'url_info': url_info,
-                'total_time': f"{elapsed_time:.2f}s",
+                'error': 'Nenhuma URL encontrada no arquivo',
                 'request_id': request_id
-            }), 500
+            }), 400
+        
+        logger.info(f"[{request_id}] {len(urls)} URLs carregadas do arquivo")
+        
+        # Processar cada URL sequencialmente (uma de cada vez)
+        results = []
+        for i, url in enumerate(urls, 1):
+            logger.info(f"[{request_id}] Processando URL {i}/{len(urls)}: {url}")
+            result = process_url_with_retry(url, max_retries=2)
+            results.append(result)
+            
+            # Pequena pausa entre processamentos
+            if i < len(urls):
+                time.sleep(1)
+        
+        # Calcular estatísticas
+        total_time = time.time() - start_time
+        successful = sum(1 for r in results if r.get('success'))
+        failed = len(results) - successful
+        already_existed = sum(1 for r in results if r.get('already_exists'))
+        
+        logger.info(f"[{request_id}] Processamento concluído: {successful} sucesso, {failed} falhas")
+        
+        return jsonify({
+            'success': True,
+            'request_id': request_id,
+            'summary': {
+                'total_urls': len(urls),
+                'successful': successful,
+                'failed': failed,
+                'already_existed': already_existed,
+                'total_time': f"{total_time:.2f}s"
+            },
+            'results': results
+        }), 200
     
     except Exception as e:
         elapsed_time = time.time() - start_time
@@ -356,21 +373,26 @@ def baixar_video():
 def health():
     """Health check"""
     ublock_status = "Instalado" if os.path.exists(UBLOCK_XPI) else "Não instalado"
+    urls_file_exists = os.path.exists(URLS_FILE)
     
     return jsonify({
         'status': 'OK',
         'service': 'Warezcdn + Mixdrop Video Downloader',
         'ublock_origin': ublock_status,
         'downloads_dir': DOWNLOADS_DIR,
+        'urls_file': URLS_FILE,
+        'urls_file_exists': urls_file_exists,
         'features': [
+            'Processamento sequencial de URLs',
+            'Carregamento automático do arquivo JSON',
+            'Processamento das 2 primeiras URLs',
             'Download automático de vídeos',
             'Organização por ID/temporada/episódio',
             'Verificação de arquivo existente',
             'Remoção automática em caso de erro',
             'uBlock Origin integrado',
             'Sistema de retry',
-            'Progress logging',
-            'Extração separada da URL do vídeo'
+            'Progress logging'
         ]
     }), 200
 
@@ -378,30 +400,29 @@ def health():
 def index():
     """Página inicial"""
     ublock_status = "Instalado" if os.path.exists(UBLOCK_XPI) else "Não instalado"
+    urls_file_exists = os.path.exists(URLS_FILE)
     
     return jsonify({
         'service': 'API de Download Warezcdn + Mixdrop',
-        'version': '6.0',
+        'version': '7.0',
         'provider': 'Warezcdn (Mixdrop)',
         'ublock_origin': ublock_status,
         'downloads_dir': DOWNLOADS_DIR,
-        'architecture': 'Modular (extração separada)',
+        'urls_file': URLS_FILE,
+        'urls_file_exists': urls_file_exists,
+        'architecture': 'Processamento sequencial com arquivo JSON',
         'endpoints': {
-            '/baixar?url=<URL>': 'Baixar vídeo',
+            '/baixar': 'Baixar vídeos (2 primeiras URLs do arquivo JSON)',
             '/health': 'Status da API',
             '/': 'Esta página'
-        },
-        'url_format': {
-            'movie': 'https://embed.warezcdn.cc/filme/{id}',
-            'tv': 'https://embed.warezcdn.cc/serie/{id}/{season}/{episode}'
         },
         'download_structure': {
             'movie': 'downloads/filmes/{id}/{id}.mp4',
             'tv': 'downloads/tv/{id}/{season}/{episode}.mp4'
         },
-        'examples': {
-            'movie': 'http://localhost:5000/baixar?url=https://embed.warezcdn.cc/filme/tt1234567',
-            'tv': 'http://localhost:5000/baixar?url=https://embed.warezcdn.cc/serie/tt1234567/1/1'
+        'example': {
+            'request': 'GET /baixar',
+            'description': 'Processa as 2 primeiras URLs do arquivo filmes_warezcdn_url.json'
         }
     })
 
@@ -409,9 +430,15 @@ if __name__ == "__main__":
     print("API de Download Warezcdn + Mixdrop")
     print("=" * 60)
     print("\nArquitetura:")
-    print("  - extracao.py: Extração da URL do vídeo")
+    print("  - extracao_url.py: Extração da URL do vídeo")
     print("  - downloader_local.py: Download e gerenciamento")
+    print("  - Processamento sequencial (um de cada vez)")
+    print("\nArquivo de URLs:")
+    print(f"  - {URLS_FILE}")
+    print(f"  - Processa as 2 primeiras URLs do arquivo")
     print("\nRecursos:")
+    print("  - Carregamento automático de URLs do JSON")
+    print("  - Extração sequencial (similar a async/await)")
     print("  - Download automático de vídeos")
     print("  - Organização automática por ID/temporada/episódio")
     print("  - Filmes: downloads/filmes/{id}/{id}.mp4")
@@ -423,10 +450,7 @@ if __name__ == "__main__":
     print("  - Progress logging durante download")
     print(f"\nDiretório de downloads: {DOWNLOADS_DIR}")
     print("\nEndpoint:")
-    print("  GET /baixar?url=<URL>")
-    print("\nExemplos:")
-    print("  Filme: /baixar?url=https://embed.warezcdn.cc/filme/tt1234567")
-    print("  Série: /baixar?url=https://embed.warezcdn.cc/serie/tt1234567/1/1")
+    print("  GET /baixar")
     print("\nIniciando servidor em http://0.0.0.0:5000")
     print("=" * 60)
     
