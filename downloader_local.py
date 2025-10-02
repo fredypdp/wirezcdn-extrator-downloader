@@ -185,6 +185,17 @@ def is_valid_warezcdn_url(url):
     except:
         return False
 
+def cleanup_failed_download(filepath, driver_id):
+    """Remove arquivo em caso de falha"""
+    try:
+        if os.path.exists(filepath):
+            os.remove(filepath)
+            logger.info(f"[{driver_id}] Arquivo removido após falha: {filepath}")
+            return True
+    except Exception as e:
+        logger.error(f"[{driver_id}] Erro ao remover arquivo: {e}")
+    return False
+
 def mouse_click(driver, element, driver_id):
     """Clica em elemento emulando comportamento real do mouse"""
     try:
@@ -345,14 +356,6 @@ def download_video(video_url, driver_id, filepath):
             except Exception as remove_error:
                 logger.error(f"[{driver_id}] Erro ao remover arquivo temporário: {remove_error}")
         
-        # Remover arquivo final se existir (download parcial)
-        if os.path.exists(filepath):
-            try:
-                os.remove(filepath)
-                logger.info(f"[{driver_id}] Arquivo parcial removido: {filepath}")
-            except Exception as remove_error:
-                logger.error(f"[{driver_id}] Erro ao remover arquivo parcial: {remove_error}")
-        
         return {
             'success': False,
             'error': str(e)
@@ -362,6 +365,7 @@ def extract_video_url_and_download(url, driver_id, download_path_info):
     """Extrai URL do vídeo e faz download"""
     start_time = time.time()
     driver = None
+    filepath = download_path_info['filepath']
     
     try:
         driver = criar_navegador_firefox_com_ublock()
@@ -403,6 +407,7 @@ def extract_video_url_and_download(url, driver_id, download_path_info):
             
         except Exception as e:
             logger.error(f"[{driver_id}] Erro com audio-selector: {e}")
+            cleanup_failed_download(filepath, driver_id)
             return None
         
         # Passo 3: Server-selector
@@ -501,6 +506,7 @@ def extract_video_url_and_download(url, driver_id, download_path_info):
             
         except Exception as e:
             logger.error(f"[{driver_id}] Erro ao processar iframes: {e}")
+            cleanup_failed_download(filepath, driver_id)
             return None
         
         # Passo 6: Aguardar player processar (10 segundos)
@@ -575,6 +581,7 @@ def extract_video_url_and_download(url, driver_id, download_path_info):
         
         if not video_url:
             logger.error(f"[{driver_id}] URL não encontrada")
+            cleanup_failed_download(filepath, driver_id)
             return None
         
         # Passo 9: Fazer download do vídeo
@@ -591,6 +598,8 @@ def extract_video_url_and_download(url, driver_id, download_path_info):
                 'total_time': f"{elapsed:.2f}s"
             }
         else:
+            # Download falhou, remover arquivo
+            cleanup_failed_download(filepath, driver_id)
             return {
                 'success': False,
                 'error': download_result.get('error', 'Erro desconhecido no download')
@@ -598,6 +607,8 @@ def extract_video_url_and_download(url, driver_id, download_path_info):
         
     except Exception as e:
         logger.error(f"[{driver_id}] Erro durante extração: {e}")
+        # Remover arquivo em caso de erro geral
+        cleanup_failed_download(filepath, driver_id)
         return {
             'success': False,
             'error': str(e)
@@ -752,8 +763,8 @@ def health():
         'features': [
             'Download automático de vídeos',
             'Organização por ID/temporada/episódio',
-            'Remoção automática em caso de erro',
             'Verificação de arquivo existente',
+            'Remoção automática em caso de erro',
             'uBlock Origin integrado',
             'Sistema de retry',
             'Progress logging'
