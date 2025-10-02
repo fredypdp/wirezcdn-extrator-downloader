@@ -11,6 +11,9 @@ import uuid
 import requests
 from extracao_url import extrair_url_video, UBLOCK_XPI
 
+import threading
+from queue import Queue
+
 # Configurar logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -26,12 +29,16 @@ CORS(app)
 DOWNLOADS_DIR = os.path.join(os.getcwd(), 'downloads')
 URLS_FILE = 'filmes_warezcdn_url.json'
 
+# Variáveis dinâmicas (serão definidas pelo usuário)
+NUM_FILMES = 2  # Padrão
+MAX_DOWNLOADS_SIMULTANEOS = 2  # Padrão
+
 # Criar diretório de downloads
 if not os.path.exists(DOWNLOADS_DIR):
     os.makedirs(DOWNLOADS_DIR)
     logger.info(f"Diretório de downloads criado: {DOWNLOADS_DIR}")
 
-def load_urls_from_file():
+def load_urls_from_file(num_filmes):
     """Carrega URLs do arquivo JSON"""
     try:
         if not os.path.exists(URLS_FILE):
@@ -42,8 +49,8 @@ def load_urls_from_file():
             data = json.load(f)
         
         urls = data.get('urls', [])
-        # Pegar apenas as 2 primeiras URLs
-        return urls[:2]
+        # Pegar apenas as N primeiras URLs conforme definido pelo usuário
+        return urls[:num_filmes]
         
     except Exception as e:
         logger.error(f"Erro ao carregar arquivo de URLs: {e}")
@@ -182,21 +189,14 @@ def download_video(video_url, driver_id, filepath):
             'error': str(e)
         }
 
-def extract_and_download(url, driver_id, download_path_info):
-    """Extrai URL do vídeo e faz download (processamento sequencial)"""
-    start_time = time.time()
-    filepath = download_path_info['filepath']
-    
+def extract_video_url(url, driver_id):
+    """Extrai apenas a URL do vídeo"""
     try:
-        logger.info(f"[{driver_id}] Iniciando processo: {url}")
-        
-        # Passo 1: Extrair URL do vídeo (sequencial, um de cada vez)
-        logger.info(f"[{driver_id}] Extraindo URL do vídeo...")
+        logger.info(f"[{driver_id}] Extraindo URL do vídeo: {url}")
         extraction_result = extrair_url_video(url, driver_id)
         
         if not extraction_result.get('success'):
             logger.error(f"[{driver_id}] Falha na extração: {extraction_result.get('error')}")
-            cleanup_failed_download(filepath, driver_id)
             return {
                 'success': False,
                 'error': extraction_result.get('error', 'Erro na extração'),
@@ -204,111 +204,91 @@ def extract_and_download(url, driver_id, download_path_info):
             }
         
         video_url = extraction_result['video_url']
-        logger.info(f"[{driver_id}] URL extraída com sucesso")
+        logger.info(f"[{driver_id}] URL extraída com sucesso: {video_url[:80]}...")
         
-        # Passo 2: Fazer download do vídeo
-        logger.info(f"[{driver_id}] Iniciando download do vídeo...")
-        download_result = download_video(video_url, driver_id, download_path_info['filepath'])
-        
-        if download_result['success']:
-            elapsed = time.time() - start_time
-            return {
-                'success': True,
-                'url': url,
-                'video_url': video_url,
-                'filepath': download_result['filepath'],
-                'size_mb': download_result['size_mb'],
-                'extraction_time': extraction_result.get('extraction_time', 'N/A'),
-                'total_time': f"{elapsed:.2f}s"
-            }
-        else:
-            # Download falhou, remover arquivo
-            cleanup_failed_download(filepath, driver_id)
-            return {
-                'success': False,
-                'url': url,
-                'error': download_result.get('error', 'Erro desconhecido no download')
-            }
+        return {
+            'success': True,
+            'url': url,
+            'video_url': video_url,
+            'extraction_time': extraction_result.get('extraction_time', 'N/A')
+        }
         
     except Exception as e:
-        logger.error(f"[{driver_id}] Erro durante processo: {e}")
-        # Remover arquivo em caso de erro geral
-        cleanup_failed_download(filepath, driver_id)
+        logger.error(f"[{driver_id}] Erro durante extração: {e}")
         return {
             'success': False,
             'url': url,
             'error': str(e)
         }
 
-def process_url_with_retry(url, max_retries=2):
-    """Processa uma URL com sistema de retry"""
-    session_id = str(uuid.uuid4())[:8]
+def download_video_thread(video_url, driver_id, filepath, results_queue):
+    """Faz download do vídeo em thread separada"""
+    result = download_video(video_url, driver_id, filepath)
+    result['driver_id'] = driver_id
+    results_queue.put(result)
+
+def download_videos_parallel(extraction_results, download_infos, max_simultaneos):
+    """Faz download de múltiplos vídeos em paralelo com limite de simultaneidade"""
+    results_queue = Queue()
+    all_results = []
     
-    # Parse da URL
-    url_info = parse_url_info(url)
-    if not url_info:
-        return {
-            'success': False,
-            'url': url,
-            'error': 'Formato de URL inválido'
-        }
+    # Filtrar apenas extrações bem-sucedidas
+    valid_extractions = [(i, e) for i, e in enumerate(extraction_results) if e.get('success')]
     
-    # Definir caminho de download
-    download_path_info = get_download_path(url_info)
-    if not download_path_info:
-        return {
-            'success': False,
-            'url': url,
-            'error': 'Não foi possível determinar o caminho de download'
-        }
+    logger.info(f"Iniciando downloads com limite de {max_simultaneos} simultâneos...")
+    logger.info(f"Total de vídeos para download: {len(valid_extractions)}")
     
-    # Verificar se o arquivo já existe
-    filepath = download_path_info['filepath']
-    if os.path.exists(filepath):
-        file_size = os.path.getsize(filepath)
-        size_mb = file_size / (1024 * 1024)
-        logger.info(f"[{session_id}] Arquivo já existe: {filepath} ({size_mb:.2f} MB)")
-        return {
-            'success': True,
-            'url': url,
-            'already_exists': True,
-            'filepath': filepath,
-            'size_mb': size_mb,
-            'url_info': url_info,
-            'message': 'Arquivo já foi baixado anteriormente'
-        }
-    
-    # Se não existe, prosseguir com o download
-    for attempt in range(max_retries):
-        if attempt > 0:
-            logger.info(f"[{session_id}] Tentativa {attempt + 1} de {max_retries}")
-            time.sleep(2)
+    # Processar em lotes de acordo com o limite
+    for batch_start in range(0, len(valid_extractions), max_simultaneos):
+        batch_end = min(batch_start + max_simultaneos, len(valid_extractions))
+        batch = valid_extractions[batch_start:batch_end]
         
-        result = extract_and_download(url, session_id, download_path_info)
+        logger.info(f"\n{'='*60}")
+        logger.info(f"LOTE {batch_start//max_simultaneos + 1}: Baixando {len(batch)} vídeos simultâneos")
+        logger.info(f"{'='*60}")
         
-        if result and result.get('success'):
-            result['url_info'] = url_info
-            return result
+        threads = []
+        
+        for idx, extraction in batch:
+            video_url = extraction['video_url']
+            driver_id = extraction['driver_id']
+            filepath = download_infos[idx]['filepath']
+            
+            # Criar thread para download
+            thread = threading.Thread(
+                target=download_video_thread,
+                args=(video_url, driver_id, filepath, results_queue)
+            )
+            thread.start()
+            threads.append(thread)
+        
+        # Aguardar todas as threads do lote terminarem
+        for thread in threads:
+            thread.join()
+        
+        # Coletar resultados do lote
+        batch_results = []
+        while not results_queue.empty():
+            batch_results.append(results_queue.get())
+        all_results.extend(batch_results)
+        
+        logger.info(f"Lote {batch_start//max_simultaneos + 1} concluído: {len(batch_results)} downloads finalizados")
     
-    logger.error(f"[{session_id}] Todas as tentativas falharam para {url}")
-    return {
-        'success': False,
-        'url': url,
-        'url_info': url_info,
-        'error': 'Todas as tentativas de download falharam'
-    }
+    logger.info(f"\nTodos os {len(all_results)} downloads concluídos")
+    return all_results
 
 @app.route('/baixar', methods=['GET'])
 def baixar_videos():
-    """Endpoint principal - baixa as 2 primeiras URLs do arquivo JSON"""
+    """Endpoint principal - baixa as URLs do arquivo JSON"""
     start_time = time.time()
     request_id = str(uuid.uuid4())[:8]
     
     try:
         logger.info(f"[{request_id}] Iniciando processamento de URLs do arquivo {URLS_FILE}")
+        logger.info(f"[{request_id}] Configuração: {NUM_FILMES} filmes, {MAX_DOWNLOADS_SIMULTANEOS} downloads simultâneos")
         
         # Carregar URLs do arquivo
-        urls = load_urls_from_file()
+        urls = load_urls_from_file(NUM_FILMES)
         
         if urls is None:
             return jsonify({
@@ -326,24 +306,151 @@ def baixar_videos():
         
         logger.info(f"[{request_id}] {len(urls)} URLs carregadas do arquivo")
         
-        # Processar cada URL sequencialmente (uma de cada vez)
-        results = []
+        # FASE 1: Extrair todas as URLs sequencialmente (uma de cada vez)
+        logger.info(f"\n{'='*60}")
+        logger.info(f"[{request_id}] FASE 1: Extraindo URLs dos vídeos...")
+        logger.info(f"{'='*60}")
+        extraction_results = []
+        download_infos = []
+        
         for i, url in enumerate(urls, 1):
-            logger.info(f"[{request_id}] Processando URL {i}/{len(urls)}: {url}")
-            result = process_url_with_retry(url, max_retries=2)
-            results.append(result)
+            logger.info(f"[{request_id}] Extraindo URL {i}/{len(urls)}: {url}")
             
-            # Pequena pausa entre processamentos
+            # Parse da URL
+            url_info = parse_url_info(url)
+            if not url_info:
+                extraction_results.append({
+                    'success': False,
+                    'url': url,
+                    'error': 'Formato de URL inválido'
+                })
+                continue
+            
+            # Definir caminho de download
+            download_path_info = get_download_path(url_info)
+            if not download_path_info:
+                extraction_results.append({
+                    'success': False,
+                    'url': url,
+                    'error': 'Não foi possível determinar o caminho de download'
+                })
+                continue
+            
+            # Verificar se o arquivo já existe
+            filepath = download_path_info['filepath']
+            if os.path.exists(filepath):
+                file_size = os.path.getsize(filepath)
+                size_mb = file_size / (1024 * 1024)
+                logger.info(f"[{request_id}] Arquivo já existe: {filepath} ({size_mb:.2f} MB)")
+                extraction_results.append({
+                    'success': True,
+                    'url': url,
+                    'already_exists': True,
+                    'filepath': filepath,
+                    'size_mb': size_mb,
+                    'url_info': url_info
+                })
+                continue
+            
+            # Extrair URL do vídeo
+            session_id = str(uuid.uuid4())[:8]
+            extraction = extract_video_url(url, session_id)
+            extraction['url_info'] = url_info
+            extraction['driver_id'] = session_id
+            extraction_results.append(extraction)
+            download_infos.append(download_path_info)
+            
+            # Pequena pausa entre extrações
             if i < len(urls):
                 time.sleep(1)
         
+        extraction_time = time.time() - start_time
+        logger.info(f"\n{'='*60}")
+        logger.info(f"[{request_id}] FASE 1 concluída em {extraction_time:.2f}s")
+        logger.info(f"{'='*60}")
+        
+        # FASE 2: Fazer download de todos os vídeos em paralelo
+        logger.info(f"\n{'='*60}")
+        logger.info(f"[{request_id}] FASE 2: Baixando vídeos em paralelo...")
+        logger.info(f"{'='*60}")
+        
+        # Filtrar apenas extrações bem-sucedidas que precisam de download
+        videos_to_download = [e for e in extraction_results if e.get('success') and not e.get('already_exists')]
+        download_infos_filtered = [download_infos[i] for i, e in enumerate(extraction_results) if e.get('success') and not e.get('already_exists') and i < len(download_infos)]
+        
+        if videos_to_download:
+            download_results = download_videos_parallel(videos_to_download, download_infos_filtered, MAX_DOWNLOADS_SIMULTANEOS)
+            
+            # Combinar resultados de extração e download
+            final_results = []
+            download_idx = 0
+            
+            for extraction in extraction_results:
+                if extraction.get('already_exists'):
+                    final_results.append({
+                        'success': True,
+                        'url': extraction['url'],
+                        'already_exists': True,
+                        'filepath': extraction['filepath'],
+                        'size_mb': extraction['size_mb'],
+                        'url_info': extraction['url_info'],
+                        'message': 'Arquivo já existe'
+                    })
+                elif not extraction.get('success'):
+                    final_results.append({
+                        'success': False,
+                        'url': extraction['url'],
+                        'error': extraction.get('error'),
+                        'phase': 'extraction'
+                    })
+                else:
+                    # Buscar resultado do download correspondente
+                    download_result = download_results[download_idx] if download_idx < len(download_results) else None
+                    download_idx += 1
+                    
+                    if download_result and download_result.get('success'):
+                        final_results.append({
+                            'success': True,
+                            'url': extraction['url'],
+                            'video_url': extraction['video_url'],
+                            'filepath': download_result['filepath'],
+                            'size_mb': download_result['size_mb'],
+                            'url_info': extraction['url_info'],
+                            'extraction_time': extraction.get('extraction_time'),
+                            'message': 'Download concluído'
+                        })
+                    else:
+                        final_results.append({
+                            'success': False,
+                            'url': extraction['url'],
+                            'error': download_result.get('error') if download_result else 'Erro no download',
+                            'phase': 'download'
+                        })
+        else:
+            # Nenhum vídeo para baixar (todos já existiam ou falharam na extração)
+            final_results = extraction_results
+        
         # Calcular estatísticas
         total_time = time.time() - start_time
-        successful = sum(1 for r in results if r.get('success'))
-        failed = len(results) - successful
-        already_existed = sum(1 for r in results if r.get('already_exists'))
+        successful = sum(1 for r in final_results if r.get('success'))
+        failed = len(final_results) - successful
+        already_existed = sum(1 for r in final_results if r.get('already_exists'))
+        downloaded = successful - already_existed
         
-        logger.info(f"[{request_id}] Processamento concluído: {successful} sucesso, {failed} falhas")
+        # Exibir estatísticas no terminal
+        print("\n" + "="*60)
+        print("ESTATÍSTICAS FINAIS")
+        print("="*60)
+        print(f"Total de URLs processadas: {len(urls)}")
+        print(f"✓ Sucessos: {successful}")
+        print(f"  - Já existiam: {already_existed}")
+        print(f"  - Baixados agora: {downloaded}")
+        print(f"✗ Falhas: {failed}")
+        print(f"Tempo de extração: {extraction_time:.2f}s")
+        print(f"Tempo total: {total_time:.2f}s")
+        print("="*60 + "\n")
+        
+        logger.info(f"[{request_id}] Processamento concluído: {successful} sucesso ({already_existed} já existiam, {downloaded} baixados), {failed} falhas")
         
         return jsonify({
             'success': True,
@@ -351,11 +458,13 @@ def baixar_videos():
             'summary': {
                 'total_urls': len(urls),
                 'successful': successful,
-                'failed': failed,
+                'downloaded': downloaded,
                 'already_existed': already_existed,
+                'failed': failed,
+                'extraction_time': f"{extraction_time:.2f}s",
                 'total_time': f"{total_time:.2f}s"
             },
-            'results': results
+            'results': final_results
         }), 200
     
     except Exception as e:
@@ -382,17 +491,23 @@ def health():
         'downloads_dir': DOWNLOADS_DIR,
         'urls_file': URLS_FILE,
         'urls_file_exists': urls_file_exists,
+        'config': {
+            'num_filmes': NUM_FILMES,
+            'max_downloads_simultaneos': MAX_DOWNLOADS_SIMULTANEOS
+        },
         'features': [
             'Processamento sequencial de URLs',
             'Carregamento automático do arquivo JSON',
-            'Processamento das 2 primeiras URLs',
+            'Número de filmes configurável',
+            'Downloads simultâneos configuráveis',
             'Download automático de vídeos',
             'Organização por ID/temporada/episódio',
             'Verificação de arquivo existente',
             'Remoção automática em caso de erro',
             'uBlock Origin integrado',
             'Sistema de retry',
-            'Progress logging'
+            'Progress logging',
+            'Estatísticas em tempo real'
         ]
     }), 200
 
@@ -404,15 +519,19 @@ def index():
     
     return jsonify({
         'service': 'API de Download Warezcdn + Mixdrop',
-        'version': '7.0',
+        'version': '8.0 - Interativo',
         'provider': 'Warezcdn (Mixdrop)',
         'ublock_origin': ublock_status,
         'downloads_dir': DOWNLOADS_DIR,
         'urls_file': URLS_FILE,
         'urls_file_exists': urls_file_exists,
-        'architecture': 'Processamento sequencial com arquivo JSON',
+        'config': {
+            'num_filmes': NUM_FILMES,
+            'max_downloads_simultaneos': MAX_DOWNLOADS_SIMULTANEOS
+        },
+        'architecture': 'Processamento sequencial com arquivo JSON + downloads paralelos controlados',
         'endpoints': {
-            '/baixar': 'Baixar vídeos (2 primeiras URLs do arquivo JSON)',
+            '/baixar': 'Baixar vídeos (URLs do arquivo JSON)',
             '/health': 'Status da API',
             '/': 'Esta página'
         },
@@ -422,38 +541,308 @@ def index():
         },
         'example': {
             'request': 'GET /baixar',
-            'description': 'Processa as 2 primeiras URLs do arquivo filmes_warezcdn_url.json'
+            'description': f'Processa {NUM_FILMES} URLs do arquivo com até {MAX_DOWNLOADS_SIMULTANEOS} downloads simultâneos'
         }
     })
 
-if __name__ == "__main__":
-    print("API de Download Warezcdn + Mixdrop")
-    print("=" * 60)
-    print("\nArquitetura:")
-    print("  - extracao_url.py: Extração da URL do vídeo")
-    print("  - downloader_local.py: Download e gerenciamento")
-    print("  - Processamento sequencial (um de cada vez)")
-    print("\nArquivo de URLs:")
-    print(f"  - {URLS_FILE}")
-    print(f"  - Processa as 2 primeiras URLs do arquivo")
-    print("\nRecursos:")
-    print("  - Carregamento automático de URLs do JSON")
-    print("  - Extração sequencial (similar a async/await)")
-    print("  - Download automático de vídeos")
-    print("  - Organização automática por ID/temporada/episódio")
-    print("  - Filmes: downloads/filmes/{id}/{id}.mp4")
-    print("  - Séries: downloads/tv/{id}/{season}/{episode}.mp4")
-    print("  - Verificação de arquivo existente (evita re-download)")
-    print("  - Remoção automática de arquivos em caso de erro")
-    print("  - uBlock Origin integrado")
-    print("  - Sistema de retry (2 tentativas)")
-    print("  - Progress logging durante download")
-    print(f"\nDiretório de downloads: {DOWNLOADS_DIR}")
-    print("\nEndpoint:")
-    print("  GET /baixar")
-    print("\nIniciando servidor em http://0.0.0.0:5000")
-    print("=" * 60)
+def processar_downloads_terminal():
+    """Processa downloads diretamente pelo terminal"""
+    start_time = time.time()
+    request_id = str(uuid.uuid4())[:8]
     
+    try:
+        logger.info(f"[{request_id}] Iniciando processamento de URLs do arquivo {URLS_FILE}")
+        logger.info(f"[{request_id}] Configuração: {NUM_FILMES} filmes, {MAX_DOWNLOADS_SIMULTANEOS} downloads simultâneos")
+        
+        # Carregar URLs do arquivo
+        urls = load_urls_from_file(NUM_FILMES)
+        
+        if urls is None:
+            print(f"\n❌ Erro: Não foi possível carregar o arquivo {URLS_FILE}")
+            return
+        
+        if len(urls) == 0:
+            print("\n❌ Erro: Nenhuma URL encontrada no arquivo")
+            return
+        
+        logger.info(f"[{request_id}] {len(urls)} URLs carregadas do arquivo")
+        
+        # FASE 1: Extrair todas as URLs sequencialmente
+        print("\n" + "="*60)
+        print(f"FASE 1: EXTRAÇÃO DE URLs")
+        print("="*60)
+        extraction_results = []
+        download_infos = []
+        
+        for i, url in enumerate(urls, 1):
+            print(f"\n[{i}/{len(urls)}] Extraindo: {url}")
+            
+            # Parse da URL
+            url_info = parse_url_info(url)
+            if not url_info:
+                extraction_results.append({
+                    'success': False,
+                    'url': url,
+                    'error': 'Formato de URL inválido'
+                })
+                print(f"  ❌ Formato de URL inválido")
+                continue
+            
+            # Definir caminho de download
+            download_path_info = get_download_path(url_info)
+            if not download_path_info:
+                extraction_results.append({
+                    'success': False,
+                    'url': url,
+                    'error': 'Não foi possível determinar o caminho de download'
+                })
+                print(f"  ❌ Erro ao determinar caminho de download")
+                continue
+            
+            # Verificar se o arquivo já existe
+            filepath = download_path_info['filepath']
+            if os.path.exists(filepath):
+                file_size = os.path.getsize(filepath)
+                size_mb = file_size / (1024 * 1024)
+                extraction_results.append({
+                    'success': True,
+                    'url': url,
+                    'already_exists': True,
+                    'filepath': filepath,
+                    'size_mb': size_mb,
+                    'url_info': url_info
+                })
+                print(f"  ✓ Arquivo já existe ({size_mb:.2f} MB)")
+                continue
+            
+            # Extrair URL do vídeo
+            session_id = str(uuid.uuid4())[:8]
+            extraction = extract_video_url(url, session_id)
+            extraction['url_info'] = url_info
+            extraction['driver_id'] = session_id
+            extraction_results.append(extraction)
+            download_infos.append(download_path_info)
+            
+            if extraction.get('success'):
+                print(f"  ✓ URL extraída com sucesso")
+            else:
+                print(f"  ❌ Falha na extração: {extraction.get('error')}")
+            
+            # Pequena pausa entre extrações
+            if i < len(urls):
+                time.sleep(1)
+        
+        extraction_time = time.time() - start_time
+        print(f"\n✓ Fase 1 concluída em {extraction_time:.2f}s")
+        
+        # FASE 2: Fazer download dos vídeos em paralelo
+        print("\n" + "="*60)
+        print(f"FASE 2: DOWNLOAD DE VÍDEOS")
+        print("="*60)
+        
+        # Filtrar apenas extrações bem-sucedidas que precisam de download
+        videos_to_download = [e for e in extraction_results if e.get('success') and not e.get('already_exists')]
+        download_infos_filtered = [download_infos[i] for i, e in enumerate(extraction_results) if e.get('success') and not e.get('already_exists') and i < len(download_infos)]
+        
+        if videos_to_download:
+            download_results = download_videos_parallel(videos_to_download, download_infos_filtered, MAX_DOWNLOADS_SIMULTANEOS)
+            
+            # Combinar resultados
+            final_results = []
+            download_idx = 0
+            
+            for extraction in extraction_results:
+                if extraction.get('already_exists'):
+                    final_results.append({
+                        'success': True,
+                        'url': extraction['url'],
+                        'already_exists': True,
+                        'filepath': extraction['filepath'],
+                        'size_mb': extraction['size_mb'],
+                        'url_info': extraction['url_info'],
+                        'message': 'Arquivo já existe'
+                    })
+                elif not extraction.get('success'):
+                    final_results.append({
+                        'success': False,
+                        'url': extraction['url'],
+                        'error': extraction.get('error'),
+                        'phase': 'extraction'
+                    })
+                else:
+                    download_result = download_results[download_idx] if download_idx < len(download_results) else None
+                    download_idx += 1
+                    
+                    if download_result and download_result.get('success'):
+                        final_results.append({
+                            'success': True,
+                            'url': extraction['url'],
+                            'video_url': extraction['video_url'],
+                            'filepath': download_result['filepath'],
+                            'size_mb': download_result['size_mb'],
+                            'url_info': extraction['url_info'],
+                            'extraction_time': extraction.get('extraction_time'),
+                            'message': 'Download concluído'
+                        })
+                    else:
+                        final_results.append({
+                            'success': False,
+                            'url': extraction['url'],
+                            'error': download_result.get('error') if download_result else 'Erro no download',
+                            'phase': 'download'
+                        })
+        else:
+            final_results = extraction_results
+        
+        # Calcular e exibir estatísticas
+        total_time = time.time() - start_time
+        successful = sum(1 for r in final_results if r.get('success'))
+        failed = len(final_results) - successful
+        already_existed = sum(1 for r in final_results if r.get('already_exists'))
+        downloaded = successful - already_existed
+        
+        print("\n" + "="*60)
+        print("ESTATÍSTICAS FINAIS")
+        print("="*60)
+        print(f"Total de URLs processadas: {len(urls)}")
+        print(f"✓ Sucessos: {successful}")
+        print(f"  - Já existiam: {already_existed}")
+        print(f"  - Baixados agora: {downloaded}")
+        print(f"✗ Falhas: {failed}")
+        print(f"Tempo de extração: {extraction_time:.2f}s")
+        print(f"Tempo total: {total_time:.2f}s")
+        print("="*60 + "\n")
+        
+        # Listar erros se houver
+        if failed > 0:
+            print("DETALHES DOS ERROS:")
+            print("-" * 60)
+            for i, result in enumerate(final_results, 1):
+                if not result.get('success'):
+                    print(f"{i}. {result.get('url')}")
+                    print(f"   Erro: {result.get('error')}")
+                    print(f"   Fase: {result.get('phase', 'N/A')}")
+            print("-" * 60 + "\n")
+        
+    except Exception as e:
+        elapsed_time = time.time() - start_time
+        logger.error(f"[{request_id}] Erro inesperado: {str(e)}")
+        print(f"\n❌ Erro inesperado: {str(e)}")
+
+def configurar_parametros():
+    """Terminal interativo para configurar parâmetros"""
+    global NUM_FILMES, MAX_DOWNLOADS_SIMULTANEOS
+    
+    print("\n" + "="*60)
+    print("CONFIGURAÇÃO DE DOWNLOAD")
+    print("="*60)
+    
+    # Configurar número de filmes
+    while True:
+        try:
+            resposta = input(f"\nQuantos filmes deseja baixar? [padrão: {NUM_FILMES}]: ").strip()
+            if resposta == "":
+                break
+            num = int(resposta)
+            if num > 0:
+                NUM_FILMES = num
+                break
+            else:
+                print("❌ Por favor, insira um número maior que 0")
+        except ValueError:
+            print("❌ Por favor, insira um número válido")
+    
+    # Configurar downloads simultâneos
+    while True:
+        try:
+            resposta = input(f"Quantos downloads simultâneos? [padrão: {MAX_DOWNLOADS_SIMULTANEOS}, máx: 5]: ").strip()
+            if resposta == "":
+                break
+            num = int(resposta)
+            if 1 <= num <= 5:
+                MAX_DOWNLOADS_SIMULTANEOS = num
+                break
+            else:
+                print("❌ Por favor, insira um número entre 1 e 5")
+        except ValueError:
+            print("❌ Por favor, insira um número válido")
+    
+    print("\n" + "="*60)
+    print("CONFIGURAÇÃO CONFIRMADA")
+    print("="*60)
+    print(f"✓ Filmes para baixar: {NUM_FILMES}")
+    print(f"✓ Downloads simultâneos: {MAX_DOWNLOADS_SIMULTANEOS}")
+    print("="*60 + "\n")
+    
+    # Perguntar se deseja iniciar downloads
+    while True:
+        resposta = input("Deseja iniciar os downloads agora? (s/n): ").strip().lower()
+        if resposta in ['s', 'sim', 'y', 'yes']:
+            return True
+        elif resposta in ['n', 'não', 'nao', 'no']:
+            return False
+        else:
+            print("❌ Por favor, responda com 's' ou 'n'")
+
+if __name__ == "__main__":
+    print("\n" + "="*60)
+    print("API DE DOWNLOAD WAREZCDN + MIXDROP")
+    print("Versão 8.0 - Modo Interativo (Terminal)")
+    print("="*60)
+    
+    # Configuração interativa
+    iniciar_downloads = configurar_parametros()
+    
+    if iniciar_downloads:
+        print("\n🚀 Iniciando processo de download...\n")
+        processar_downloads_terminal()
+        print("\n✅ Processo concluído!")
+        print("\n" + "="*60)
+        print("O que deseja fazer agora?")
+        print("="*60)
+        print("1. Encerrar programa")
+        print("2. Iniciar servidor Flask (API)")
+        
+        while True:
+            escolha = input("\nEscolha uma opção (1 ou 2): ").strip()
+            if escolha == "1":
+                print("\n👋 Encerrando programa. Até logo!")
+                exit(0)
+            elif escolha == "2":
+                break
+            else:
+                print("❌ Opção inválida. Digite 1 ou 2")
+        
+        print("\n" + "="*60)
+        print("INICIANDO SERVIDOR FLASK")
+        print("="*60)
+        print(f"Arquivo de URLs: {URLS_FILE}")
+        print(f"Configuração: {NUM_FILMES} filmes, {MAX_DOWNLOADS_SIMULTANEOS} downloads simultâneos")
+        print(f"Diretório: {DOWNLOADS_DIR}")
+        print("\nEndpoints disponíveis:")
+        print("  - GET /baixar (processar downloads via API)")
+        print("  - GET /health (verificar status)")
+        print("  - GET / (informações da API)")
+        print("\nServidor: http://0.0.0.0:5000")
+        print("Pressione Ctrl+C para encerrar")
+        print("="*60 + "\n")
+    else:
+        print("\n⏭️  Downloads não iniciados.")
+        print("\n" + "="*60)
+        print("INICIANDO SERVIDOR FLASK")
+        print("="*60)
+        print(f"Arquivo de URLs: {URLS_FILE}")
+        print(f"Configuração: {NUM_FILMES} filmes, {MAX_DOWNLOADS_SIMULTANEOS} downloads simultâneos")
+        print(f"Diretório: {DOWNLOADS_DIR}")
+        print("\nEndpoints disponíveis:")
+        print("  - GET /baixar (processar downloads via API)")
+        print("  - GET /health (verificar status)")
+        print("  - GET / (informações da API)")
+        print("\nServidor: http://0.0.0.0:5000")
+        print("Pressione Ctrl+C para encerrar")
+        print("="*60 + "\n")
+    
+    # Iniciar servidor Flask
     app.run(
         host='0.0.0.0',
         port=5000,
