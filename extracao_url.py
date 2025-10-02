@@ -56,7 +56,7 @@ def criar_navegador_firefox_com_ublock():
     """Cria navegador Firefox com uBlock Origin"""
     options = Options()
     
-    # options.add_argument("--headless")
+    options.add_argument("--headless")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
