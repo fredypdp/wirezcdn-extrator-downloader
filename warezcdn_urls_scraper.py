@@ -53,22 +53,22 @@ class WarezcdnScraper:
         }
         
     def carregar_urls_existentes(self, tipo):
-        """Carrega URLs já extraídas do arquivo JSON"""
+        """Carrega URLs já extraídas do arquivo JSON mantendo a ordem"""
         arquivo = f"{tipo}_warezcdn_url.json"
         
         if not os.path.exists(arquivo):
             logger.info(f"   ℹ️ Arquivo {arquivo} não encontrado. Iniciando extração do zero.")
-            return set()
+            return []
         
         try:
             with open(arquivo, 'r', encoding='utf-8') as f:
                 dados = json.load(f)
-                urls_existentes = set(dados.get("urls", []))
+                urls_existentes = dados.get("urls", [])
                 logger.info(f"   📂 Carregadas {len(urls_existentes)} URLs existentes de {arquivo}")
                 return urls_existentes
         except Exception as e:
             logger.warning(f"   ⚠️ Erro ao carregar {arquivo}: {e}")
-            return set()
+            return []
     
     def criar_navegador_firefox(self):
         """Cria navegador Firefox otimizado (baseado no código fornecido)"""
@@ -120,7 +120,7 @@ class WarezcdnScraper:
             logger.error(f"❌ Erro ao criar driver Firefox: {e}")
             raise
     
-    def extrair_urls_pagina(self, urls_existentes):
+    def extrair_urls_pagina(self, urls_existentes_set):
         """Extrai URLs da página atual, pulando as já existentes"""
         urls_novas = []
         urls_duplicadas = 0
@@ -148,11 +148,11 @@ class WarezcdnScraper:
                     
                     if href:
                         # Verificar se já existe
-                        if href in urls_existentes:
+                        if href in urls_existentes_set:
                             urls_duplicadas += 1
                         else:
                             urls_novas.append(href)
-                            urls_existentes.add(href)  # Adicionar ao set para evitar duplicatas na mesma sessão
+                            urls_existentes_set.add(href)  # Adicionar ao set para evitar duplicatas na mesma sessão
                         
                 except NoSuchElementException:
                     continue
@@ -230,8 +230,10 @@ class WarezcdnScraper:
         self.stats[tipo]["tempo_inicio"] = time.time()
         
         try:
-            # Carregar URLs já existentes
-            urls_existentes = self.carregar_urls_existentes(tipo)
+            # Carregar URLs já existentes (como lista para manter ordem)
+            urls_existentes_lista = self.carregar_urls_existentes(tipo)
+            # Criar set para verificação rápida de duplicatas
+            urls_existentes_set = set(urls_existentes_lista)
             
             # Criar driver
             self.driver = self.criar_navegador_firefox()
@@ -255,7 +257,7 @@ class WarezcdnScraper:
                     logger.info(f"📄 Processando página {pagina_atual}...")
                     
                     # Extrair URLs da página atual
-                    urls, duplicadas = self.extrair_urls_pagina(urls_existentes)
+                    urls, duplicadas = self.extrair_urls_pagina(urls_existentes_set)
                     urls_coletadas.extend(urls)
                     
                     # Atualizar estatísticas
@@ -263,7 +265,7 @@ class WarezcdnScraper:
                     self.stats[tipo]["urls_duplicadas"] += duplicadas
                     self.stats[tipo]["paginas_processadas"] += 1
                     
-                    total_geral = len(urls_existentes)
+                    total_geral = len(urls_existentes_set)
                     logger.info(f"   📊 Total geral no arquivo: {total_geral} URLs\n")
                     
                     # Verificar limite de páginas
@@ -292,7 +294,7 @@ class WarezcdnScraper:
             self.stats[tipo]["tempo_fim"] = time.time()
             
             # Total de URLs (existentes + novas)
-            self.stats[tipo]["total_urls"] = len(urls_existentes)
+            self.stats[tipo]["total_urls"] = len(urls_existentes_set)
             
             # Resultados finais
             tempo_decorrido = self.stats[tipo]["tempo_fim"] - self.stats[tipo]["tempo_inicio"]
@@ -301,11 +303,11 @@ class WarezcdnScraper:
             logger.info(f"📊 RESUMO DO SCRAPING - {tipo.upper()}")
             logger.info(f"{'='*60}")
             logger.info(f"🆕 URLs novas coletadas: {self.stats[tipo]['urls_novas']}")
-            logger.info(f"⏭️  URLs duplicadas (puladas): {self.stats[tipo]['urls_duplicadas']}")
-            logger.info(f"📁 Total de URLs no arquivo: {self.stats[tipo]['total_urls']}")
+            logger.info(f"⭐️ URLs duplicadas (puladas): {self.stats[tipo]['urls_duplicadas']}")
+            logger.info(f"📝 Total de URLs no arquivo: {self.stats[tipo]['total_urls']}")
             logger.info(f"📄 Páginas processadas: {self.stats[tipo]['paginas_processadas']}")
             logger.info(f"❌ Erros: {len(erros)}")
-            logger.info(f"⏱️  Tempo decorrido: {tempo_decorrido:.2f}s")
+            logger.info(f"⏱️ Tempo decorrido: {tempo_decorrido:.2f}s")
             logger.info(f"{'='*60}\n")
             
             return urls_coletadas, erros
@@ -331,26 +333,23 @@ class WarezcdnScraper:
                 logger.info("🔒 Driver fechado\n")
     
     def salvar_resultados(self, tipo, urls_novas, erros):
-        """Salva os resultados em arquivos JSON (adiciona às URLs existentes)"""
+        """Salva os resultados em arquivos JSON (adiciona às URLs existentes mantendo ordem)"""
         try:
             arquivo_urls = f"{tipo}_warezcdn_url.json"
             arquivo_erros = f"{tipo}_warezcdn_erros.json"
             
-            # Carregar URLs existentes
-            urls_totais = list(self.carregar_urls_existentes(tipo))
+            # Carregar URLs existentes como lista (para manter ordem)
+            urls_existentes = self.carregar_urls_existentes(tipo)
             
-            # Adicionar novas URLs
-            urls_totais.extend(urls_novas)
+            # Adicionar novas URLs AO FINAL da lista
+            urls_totais = urls_existentes + urls_novas
             
-            # Remover duplicatas (caso haja)
-            urls_totais = list(set(urls_totais))
-            
-            # Dados para salvar
+            # Dados para salvar (SEM ordenar, mantendo ordem de inserção)
             dados_urls = {
                 "tipo": tipo,
                 "total": len(urls_totais),
                 "ultima_atualizacao": datetime.now().isoformat(),
-                "urls": sorted(urls_totais)  # Ordenar para facilitar visualização
+                "urls": urls_totais  # Manter ordem original
             }
             
             # Salvar URLs
@@ -421,12 +420,12 @@ class WarezcdnScraper:
             if stats["paginas_processadas"] > 0:
                 print(f"\n🎬 {tipo.upper()}")
                 print(f"   🆕 URLs novas: {stats['urls_novas']}")
-                print(f"   ⏭️  URLs duplicadas: {stats['urls_duplicadas']}")
-                print(f"   📁 Total no arquivo: {stats['total_urls']}")
+                print(f"   ⭐️ URLs duplicadas: {stats['urls_duplicadas']}")
+                print(f"   📝 Total no arquivo: {stats['total_urls']}")
                 print(f"   📄 Páginas: {stats['paginas_processadas']}")
                 print(f"   ❌ Erros: {stats['erros']}")
                 if tempo > 0:
-                    print(f"   ⏱️  Tempo: {tempo:.2f}s")
+                    print(f"   ⏱️ Tempo: {tempo:.2f}s")
                     if stats['paginas_processadas'] > 0:
                         print(f"   ⚡ Velocidade: {tempo/stats['paginas_processadas']:.2f}s/página")
         
@@ -435,11 +434,11 @@ class WarezcdnScraper:
             print(f"\n{'─'*70}")
             print(f"📈 TOTAIS GERAIS")
             print(f"   🆕 URLs novas coletadas: {total_urls_novas}")
-            print(f"   ⏭️  URLs duplicadas (puladas): {total_urls_duplicadas}")
+            print(f"   ⭐️ URLs duplicadas (puladas): {total_urls_duplicadas}")
             print(f"   📄 Total de páginas processadas: {total_paginas}")
             print(f"   ❌ Total de erros: {total_erros}")
             if tempo_total > 0:
-                print(f"   ⏱️  Tempo total: {tempo_total:.2f}s ({tempo_total/60:.2f} minutos)")
+                print(f"   ⏱️ Tempo total: {tempo_total:.2f}s ({tempo_total/60:.2f} minutos)")
                 if total_paginas > 0:
                     print(f"   ⚡ Velocidade média: {tempo_total/total_paginas:.2f}s/página")
         
