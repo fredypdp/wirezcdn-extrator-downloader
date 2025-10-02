@@ -49,8 +49,8 @@ def load_urls_from_file(num_filmes):
             data = json.load(f)
         
         urls = data.get('urls', [])
-        # Pegar apenas as N primeiras URLs conforme definido pelo usuário
-        return urls[:num_filmes]
+        # Retornar todas as URLs disponíveis para processar até conseguir N downloads novos
+        return urls
         
     except Exception as e:
         logger.error(f"Erro ao carregar arquivo de URLs: {e}")
@@ -312,8 +312,14 @@ def baixar_videos():
         logger.info(f"{'='*60}")
         extraction_results = []
         download_infos = []
+        downloads_needed = 0  # Contador de downloads necessários
         
         for i, url in enumerate(urls, 1):
+            # Parar se já conseguimos o número de downloads solicitados
+            if downloads_needed >= NUM_FILMES:
+                logger.info(f"[{request_id}] Meta de {NUM_FILMES} downloads atingida. Parando processamento.")
+                break
+                
             logger.info(f"[{request_id}] Extraindo URL {i}/{len(urls)}: {url}")
             
             # Parse da URL
@@ -359,6 +365,10 @@ def baixar_videos():
             extraction['driver_id'] = session_id
             extraction_results.append(extraction)
             download_infos.append(download_path_info)
+            
+            # Incrementar contador se a extração foi bem-sucedida
+            if extraction.get('success'):
+                downloads_needed += 1
             
             # Pequena pausa entre extrações
             if i < len(urls):
@@ -441,7 +451,7 @@ def baixar_videos():
         print("\n" + "="*60)
         print("ESTATÍSTICAS FINAIS")
         print("="*60)
-        print(f"Total de URLs processadas: {len(urls)}")
+        print(f"Total de URLs processadas: {len(extraction_results)}")
         print(f"✓ Sucessos: {successful}")
         print(f"  - Já existiam: {already_existed}")
         print(f"  - Baixados agora: {downloaded}")
@@ -456,7 +466,7 @@ def baixar_videos():
             'success': True,
             'request_id': request_id,
             'summary': {
-                'total_urls': len(urls),
+                'total_urls': len(extraction_results),
                 'successful': successful,
                 'downloaded': downloaded,
                 'already_existed': already_existed,
@@ -573,8 +583,14 @@ def processar_downloads_terminal():
         print("="*60)
         extraction_results = []
         download_infos = []
+        downloads_needed = 0  # Contador de downloads necessários
         
         for i, url in enumerate(urls, 1):
+            # Parar se já conseguimos o número de downloads solicitados
+            if downloads_needed >= NUM_FILMES:
+                print(f"\n✓ Meta de {NUM_FILMES} downloads atingida. Parando processamento.")
+                break
+                
             print(f"\n[{i}/{len(urls)}] Extraindo: {url}")
             
             # Parse da URL
@@ -612,7 +628,7 @@ def processar_downloads_terminal():
                     'size_mb': size_mb,
                     'url_info': url_info
                 })
-                print(f"  ✓ Arquivo já existe ({size_mb:.2f} MB)")
+                print(f"  ⏭️  Arquivo já existe ({size_mb:.2f} MB) - não conta na meta")
                 continue
             
             # Extrair URL do vídeo
@@ -624,7 +640,8 @@ def processar_downloads_terminal():
             download_infos.append(download_path_info)
             
             if extraction.get('success'):
-                print(f"  ✓ URL extraída com sucesso")
+                downloads_needed += 1
+                print(f"  ✓ URL extraída com sucesso ({downloads_needed}/{NUM_FILMES})")
             else:
                 print(f"  ❌ Falha na extração: {extraction.get('error')}")
             
@@ -704,7 +721,7 @@ def processar_downloads_terminal():
         print("\n" + "="*60)
         print("ESTATÍSTICAS FINAIS")
         print("="*60)
-        print(f"Total de URLs processadas: {len(urls)}")
+        print(f"Total de URLs processadas: {len(extraction_results)}")
         print(f"✓ Sucessos: {successful}")
         print(f"  - Já existiam: {already_existed}")
         print(f"  - Baixados agora: {downloaded}")
