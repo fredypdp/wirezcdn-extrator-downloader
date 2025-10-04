@@ -11,6 +11,7 @@ from selenium.webdriver.common.action_chains import ActionChains
 from selenium.common.exceptions import TimeoutException, NoSuchElementException, WebDriverException
 from webdriver_manager.firefox import GeckoDriverManager
 import requests
+from dotenv import load_dotenv
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -23,6 +24,107 @@ logging.getLogger('urllib3').setLevel(logging.ERROR)
 # Diretórios
 EXTENSIONS_DIR = os.path.join(os.getcwd(), 'extensions')
 UBLOCK_XPI = os.path.join(EXTENSIONS_DIR, 'ublock_origin.xpi')
+
+# Carregar as variáveis de ambiente do arquivo .env
+load_dotenv()
+
+# Configuração Supabase
+SUPABASE_URL = "https://forfhjlkrqjpglfbiosd.supabase.co"
+SUPABASE_APIKEY = os.getenv('SUPABASE_APIKEY')
+
+def verificar_video_url_existente(url_pagina):
+    """
+    Verifica se a URL da página já possui video_url no banco de dados
+    
+    Args:
+        url_pagina: URL da página do Warezcdn
+        
+    Returns:
+        str ou None: video_url se encontrado, None caso contrário
+    """
+    try:
+        if not SUPABASE_APIKEY:
+            logger.error("SUPABASE_APIKEY não encontrada nas variáveis de ambiente")
+            return None
+        
+        headers = {
+            "apikey": SUPABASE_APIKEY,
+            "Authorization": f"Bearer {SUPABASE_APIKEY}",
+        }
+        
+        # Filtrar por URL exata
+        params = {
+            "select": "url,video_url",
+            "url": f"eq.{url_pagina}"
+        }
+        
+        response = requests.get(
+            f"{SUPABASE_URL}/rest/v1/filmes_url_warezcdn",
+            headers=headers,
+            params=params,
+            timeout=10
+        )
+        
+        response.raise_for_status()
+        data = response.json()
+        
+        if data and len(data) > 0:
+            video_url = data[0].get('video_url')
+            if video_url:
+                logger.info(f"video_url já existe no banco: {video_url[:80]}...")
+                return video_url
+            else:
+                logger.info("Registro encontrado mas video_url está vazio")
+                return None
+        else:
+            logger.info("URL não encontrada no banco de dados")
+            return None
+            
+    except Exception as e:
+        logger.error(f"Erro ao verificar video_url no banco: {e}")
+        return None
+
+def atualizar_video_url_banco(url_pagina, video_url):
+    """
+    Atualiza o campo video_url no banco de dados
+    
+    Args:
+        url_pagina: URL da página do Warezcdn
+        video_url: URL do vídeo extraída
+        
+    Returns:
+        bool: True se atualizado com sucesso, False caso contrário
+    """
+    try:
+        if not SUPABASE_APIKEY:
+            logger.error("SUPABASE_APIKEY não encontrada nas variáveis de ambiente")
+            return False
+        
+        headers = {
+            "apikey": SUPABASE_APIKEY,
+            "Authorization": f"Bearer {SUPABASE_APIKEY}",
+            "Content-Type": "application/json",
+            "Prefer": "return=minimal"
+        }
+        
+        data = {
+            "video_url": video_url
+        }
+        
+        response = requests.patch(
+            f"{SUPABASE_URL}/rest/v1/filmes_url_warezcdn?url=eq.{url_pagina}",
+            headers=headers,
+            json=data,
+            timeout=10
+        )
+        
+        response.raise_for_status()
+        logger.info(f"video_url atualizada no banco com sucesso")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Erro ao atualizar video_url no banco: {e}")
+        return False
 
 def download_ublock_origin():
     """Baixa a extensão uBlock Origin se não existir"""
@@ -56,7 +158,7 @@ def criar_navegador_firefox_com_ublock():
     """Cria navegador Firefox com uBlock Origin"""
     options = Options()
     
-    # options.add_argument("--headless")
+    options.add_argument("--headless")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
@@ -208,14 +310,30 @@ def wait_for_video_playing(driver, driver_id, max_wait=15):
 def extrair_url_video(url, driver_id):
     """
     Extrai a URL do vídeo de uma página do Warezcdn
+    Verifica primeiro se já existe no banco de dados
     
     Args:
         url: URL da página do Warezcdn (filme ou série)
         driver_id: ID para logging
         
     Returns:
-        dict: {'success': True, 'video_url': 'url'} ou {'success': False, 'error': 'mensagem'}
+        dict: {'success': True, 'video_url': 'url', 'from_cache': bool} ou {'success': False, 'error': 'mensagem'}
     """
+    # Verificar primeiro se já existe no banco
+    logger.info(f"[{driver_id}] Verificando se video_url já existe no banco...")
+    video_url_existente = verificar_video_url_existente(url)
+    
+    if video_url_existente:
+        logger.info(f"[{driver_id}] video_url encontrada no cache do banco de dados")
+        return {
+            'success': True, 
+            'video_url': video_url_existente,
+            'from_cache': True,
+            'extraction_time': '0.00s'
+        }
+    
+    # Se não existe, fazer extração
+    logger.info(f"[{driver_id}] video_url não encontrada, iniciando extração...")
     start_time = time.time()
     driver = None
     
@@ -432,7 +550,17 @@ def extrair_url_video(url, driver_id):
                     elapsed = time.time() - start_time
                     logger.info(f"[{driver_id}] URL encontrada em {elapsed:.2f}s")
                     logger.info(f"[{driver_id}] URL: {video_url[:80]}...")
-                    return {'success': True, 'video_url': video_url, 'extraction_time': f"{elapsed:.2f}s"}
+                    
+                    # Atualizar banco de dados
+                    logger.info(f"[{driver_id}] Atualizando banco de dados...")
+                    atualizar_video_url_banco(url, video_url)
+                    
+                    return {
+                        'success': True, 
+                        'video_url': video_url, 
+                        'from_cache': False,
+                        'extraction_time': f"{elapsed:.2f}s"
+                    }
                 
                 time.sleep(2)
                 
