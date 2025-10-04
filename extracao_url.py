@@ -56,7 +56,7 @@ def criar_navegador_firefox_com_ublock():
     """Cria navegador Firefox com uBlock Origin"""
     options = Options()
     
-    options.add_argument("--headless")
+    # options.add_argument("--headless")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
@@ -357,8 +357,24 @@ def extrair_url_video(url, driver_id):
         logger.info(f"[{driver_id}] 6. Aguardando 10 segundos para o player processar...")
         time.sleep(10)
         
-        # Passo 7: Tentar clicar no player até funcionar
-        logger.info(f"[{driver_id}] 7. Tentando clicar no player...")
+        # Passo 7: Remover elementos de popup/overlay
+        logger.info(f"[{driver_id}] 7. Removendo overlays/popups...")
+        try:
+            removed_count = driver.execute_script("""
+                var overlays = document.querySelectorAll('div[style*="position: absolute"][style*="z-index: 2147483646"]');
+                var count = overlays.length;
+                overlays.forEach(function(overlay) {
+                    overlay.remove();
+                });
+                return count;
+            """)
+            logger.info(f"[{driver_id}] {removed_count} overlay(s) removido(s)")
+            time.sleep(1)
+        except Exception as e:
+            logger.warning(f"[{driver_id}] Erro ao remover overlays: {e}")
+        
+        # Passo 8: Tentar clicar no player até funcionar
+        logger.info(f"[{driver_id}] 8. Tentando clicar no player...")
         video_playing = False
         
         for attempt in range(3):
@@ -379,8 +395,8 @@ def extrair_url_video(url, driver_id):
         if not video_playing:
             logger.warning(f"[{driver_id}] Vídeo não começou a reproduzir")
         
-        # Passo 8: Buscar URL do vídeo
-        logger.info(f"[{driver_id}] 8. Procurando URL do vídeo...")
+        # Passo 9: Buscar URL do vídeo
+        logger.info(f"[{driver_id}] 9. Procurando URL do vídeo...")
         
         max_wait = 30
         start_search = time.time()
