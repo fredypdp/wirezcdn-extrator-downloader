@@ -1,6 +1,7 @@
 import time
 import logging
 import os
+import json
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -11,7 +12,6 @@ from selenium.webdriver.common.action_chains import ActionChains
 from selenium.common.exceptions import TimeoutException, NoSuchElementException, WebDriverException
 from webdriver_manager.firefox import GeckoDriverManager
 import requests
-from dotenv import load_dotenv
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -25,16 +25,51 @@ logging.getLogger('urllib3').setLevel(logging.ERROR)
 EXTENSIONS_DIR = os.path.join(os.getcwd(), 'extensions')
 UBLOCK_XPI = os.path.join(EXTENSIONS_DIR, 'ublock_origin.xpi')
 
-# Carregar as variáveis de ambiente do arquivo .env
-load_dotenv()
+# Arquivo JSON para armazenar URLs
+JSON_FILE = os.path.join(os.getcwd(), 'url_extraidas_filmes.json')
 
-# Configuração Supabase
-SUPABASE_URL = "https://forfhjlkrqjpglfbiosd.supabase.co"
-SUPABASE_APIKEY = os.getenv('SUPABASE_APIKEY')
+def carregar_json():
+    """
+    Carrega o arquivo JSON com as URLs extraídas
+    
+    Returns:
+        list: Lista de objetos com url e video_url
+    """
+    try:
+        if os.path.exists(JSON_FILE):
+            with open(JSON_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                logger.info(f"JSON carregado com {len(data)} registros")
+                return data
+        else:
+            logger.info("Arquivo JSON não existe, criando novo")
+            return []
+    except Exception as e:
+        logger.error(f"Erro ao carregar JSON: {e}")
+        return []
+
+def salvar_json(data):
+    """
+    Salva os dados no arquivo JSON
+    
+    Args:
+        data: Lista de objetos com url e video_url
+        
+    Returns:
+        bool: True se salvo com sucesso, False caso contrário
+    """
+    try:
+        with open(JSON_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
+        logger.info(f"JSON salvo com {len(data)} registros")
+        return True
+    except Exception as e:
+        logger.error(f"Erro ao salvar JSON: {e}")
+        return False
 
 def verificar_video_url_existente(url_pagina):
     """
-    Verifica se a URL da página já possui video_url no banco de dados
+    Verifica se a URL da página já possui video_url no arquivo JSON
     
     Args:
         url_pagina: URL da página do Warezcdn
@@ -43,50 +78,28 @@ def verificar_video_url_existente(url_pagina):
         str ou None: video_url se encontrado, None caso contrário
     """
     try:
-        if not SUPABASE_APIKEY:
-            logger.error("SUPABASE_APIKEY não encontrada nas variáveis de ambiente")
-            return None
+        data = carregar_json()
         
-        headers = {
-            "apikey": SUPABASE_APIKEY,
-            "Authorization": f"Bearer {SUPABASE_APIKEY}",
-        }
+        for item in data:
+            if item.get('url') == url_pagina:
+                video_url = item.get('video_url')
+                if video_url:
+                    logger.info(f"video_url já existe no JSON: {video_url[:80]}...")
+                    return video_url
+                else:
+                    logger.info("Registro encontrado mas video_url está vazio")
+                    return None
         
-        # Filtrar por URL exata
-        params = {
-            "select": "url,video_url",
-            "url": f"eq.{url_pagina}"
-        }
-        
-        response = requests.get(
-            f"{SUPABASE_URL}/rest/v1/filmes_url_warezcdn",
-            headers=headers,
-            params=params,
-            timeout=10
-        )
-        
-        response.raise_for_status()
-        data = response.json()
-        
-        if data and len(data) > 0:
-            video_url = data[0].get('video_url')
-            if video_url:
-                logger.info(f"video_url já existe no banco: {video_url[:80]}...")
-                return video_url
-            else:
-                logger.info("Registro encontrado mas video_url está vazio")
-                return None
-        else:
-            logger.info("URL não encontrada no banco de dados")
-            return None
+        logger.info("URL não encontrada no JSON")
+        return None
             
     except Exception as e:
-        logger.error(f"Erro ao verificar video_url no banco: {e}")
+        logger.error(f"Erro ao verificar video_url no JSON: {e}")
         return None
 
-def atualizar_video_url_banco(url_pagina, video_url):
+def atualizar_video_url_json(url_pagina, video_url):
     """
-    Atualiza o campo video_url no banco de dados
+    Atualiza ou adiciona o campo video_url no arquivo JSON
     
     Args:
         url_pagina: URL da página do Warezcdn
@@ -96,34 +109,29 @@ def atualizar_video_url_banco(url_pagina, video_url):
         bool: True se atualizado com sucesso, False caso contrário
     """
     try:
-        if not SUPABASE_APIKEY:
-            logger.error("SUPABASE_APIKEY não encontrada nas variáveis de ambiente")
-            return False
+        data = carregar_json()
         
-        headers = {
-            "apikey": SUPABASE_APIKEY,
-            "Authorization": f"Bearer {SUPABASE_APIKEY}",
-            "Content-Type": "application/json",
-            "Prefer": "return=minimal"
-        }
+        # Procurar se a URL já existe
+        encontrado = False
+        for item in data:
+            if item.get('url') == url_pagina:
+                item['video_url'] = video_url
+                encontrado = True
+                logger.info(f"video_url atualizada no JSON")
+                break
         
-        data = {
-            "video_url": video_url
-        }
+        # Se não existe, adicionar novo registro
+        if not encontrado:
+            data.append({
+                'url': url_pagina,
+                'video_url': video_url
+            })
+            logger.info(f"Novo registro adicionado ao JSON")
         
-        response = requests.patch(
-            f"{SUPABASE_URL}/rest/v1/filmes_url_warezcdn?url=eq.{url_pagina}",
-            headers=headers,
-            json=data,
-            timeout=10
-        )
-        
-        response.raise_for_status()
-        logger.info(f"video_url atualizada no banco com sucesso")
-        return True
+        return salvar_json(data)
         
     except Exception as e:
-        logger.error(f"Erro ao atualizar video_url no banco: {e}")
+        logger.error(f"Erro ao atualizar video_url no JSON: {e}")
         return False
 
 def download_ublock_origin():
@@ -310,7 +318,7 @@ def wait_for_video_playing(driver, driver_id, max_wait=15):
 def extrair_url_video(url, driver_id):
     """
     Extrai a URL do vídeo de uma página do Warezcdn
-    Verifica primeiro se já existe no banco de dados
+    Verifica primeiro se já existe no arquivo JSON
     
     Args:
         url: URL da página do Warezcdn (filme ou série)
@@ -319,12 +327,12 @@ def extrair_url_video(url, driver_id):
     Returns:
         dict: {'success': True, 'video_url': 'url', 'from_cache': bool} ou {'success': False, 'error': 'mensagem'}
     """
-    # Verificar primeiro se já existe no banco
-    logger.info(f"[{driver_id}] Verificando se video_url já existe no banco...")
+    # Verificar primeiro se já existe no JSON
+    logger.info(f"[{driver_id}] Verificando se video_url já existe no JSON...")
     video_url_existente = verificar_video_url_existente(url)
     
     if video_url_existente:
-        logger.info(f"[{driver_id}] video_url encontrada no cache do banco de dados")
+        logger.info(f"[{driver_id}] video_url encontrada no cache do JSON")
         return {
             'success': True, 
             'video_url': video_url_existente,
@@ -551,9 +559,9 @@ def extrair_url_video(url, driver_id):
                     logger.info(f"[{driver_id}] URL encontrada em {elapsed:.2f}s")
                     logger.info(f"[{driver_id}] URL: {video_url[:80]}...")
                     
-                    # Atualizar banco de dados
-                    logger.info(f"[{driver_id}] Atualizando banco de dados...")
-                    atualizar_video_url_banco(url, video_url)
+                    # Atualizar arquivo JSON
+                    logger.info(f"[{driver_id}] Atualizando arquivo JSON...")
+                    atualizar_video_url_json(url, video_url)
                     
                     return {
                         'success': True, 
