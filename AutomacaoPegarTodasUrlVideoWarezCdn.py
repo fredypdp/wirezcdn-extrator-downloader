@@ -2,14 +2,12 @@ import json
 from extracao_url import extrair_url_video
 
 # Carrega o arquivo JSON
-with open('filmes_warezcdn_url.json', 'r', encoding='utf-8') as f:
+with open('url_extraidas_filmes.json', 'r', encoding='utf-8') as f:
     data = json.load(f)
 
-# Extrai a lista de URLs
-urls = data['urls']
-
-# Itera sobre cada URL e executa a função
-for url in urls:
+# Itera sobre cada objeto no array e extrai a URL
+for item in data:
+    url = item['url']  # Acessa o campo 'url' de cada objeto
     resultado = extrair_url_video(url, "driver_1")
     
     print(f"URL processada: {url}")
