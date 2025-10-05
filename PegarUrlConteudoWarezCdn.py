@@ -375,7 +375,8 @@ class WarezcdnScraper:
                 if tipo == "filmes":
                     novos_objetos.append({
                         "url": url,
-                        "video_url": ""
+                        "video_url": "",
+                        "dublado": ""
                     })
                 else:  # series
                     novos_objetos.append({

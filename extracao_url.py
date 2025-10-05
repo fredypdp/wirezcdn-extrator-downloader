@@ -10,31 +10,29 @@ from selenium.webdriver.firefox.options import Options
 from selenium.webdriver.firefox.service import Service
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.common.exceptions import TimeoutException, NoSuchElementException, WebDriverException
-from webdriver_manager.firefox import GeckoDriverManager
 import requests
+import platform
+import zipfile
+import tarfile
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # Desabilitar logs excessivos
-logging.getLogger('WDM').setLevel(logging.ERROR)
 logging.getLogger('urllib3').setLevel(logging.ERROR)
 
 # Diretórios
 EXTENSIONS_DIR = os.path.join(os.getcwd(), 'extensions')
 UBLOCK_XPI = os.path.join(EXTENSIONS_DIR, 'ublock_origin.xpi')
+DRIVERS_DIR = os.path.join(os.getcwd(), 'drivers')
+GECKODRIVER_PATH = os.path.join(DRIVERS_DIR, 'geckodriver.exe' if platform.system() == 'Windows' else 'geckodriver')
 
 # Arquivo JSON para armazenar URLs
 JSON_FILE = os.path.join(os.getcwd(), 'url_extraidas_filmes.json')
 
 def carregar_json():
-    """
-    Carrega o arquivo JSON com as URLs extraídas
-    
-    Returns:
-        list: Lista de objetos com url e video_url
-    """
+    """Carrega o arquivo JSON com as URLs extraídas"""
     try:
         if os.path.exists(JSON_FILE):
             with open(JSON_FILE, 'r', encoding='utf-8') as f:
@@ -49,15 +47,7 @@ def carregar_json():
         return []
 
 def salvar_json(data):
-    """
-    Salva os dados no arquivo JSON
-    
-    Args:
-        data: Lista de objetos com url e video_url
-        
-    Returns:
-        bool: True se salvo com sucesso, False caso contrário
-    """
+    """Salva os dados no arquivo JSON"""
     try:
         with open(JSON_FILE, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=4)
@@ -67,24 +57,23 @@ def salvar_json(data):
         logger.error(f"Erro ao salvar JSON: {e}")
         return False
 
-def verificar_video_url_existente(url_pagina):
-    """
-    Verifica se a URL da página já possui video_url no arquivo JSON
-    
-    Args:
-        url_pagina: URL da página do Warezcdn
-        
-    Returns:
-        str ou None: video_url se encontrado, None caso contrário
-    """
+def buscar_video_url_json(url_pagina):
+    """Busca video_url no JSON pela URL da página e verifica se dublado é False"""
     try:
         data = carregar_json()
         
         for item in data:
             if item.get('url') == url_pagina:
+                dublado = item.get('dublado')
+                
+                # Se dublado é False, não extrai
+                if dublado is False:
+                    logger.info(f"Registro com dublado=False encontrado - pulando extração")
+                    return {'skip': True, 'reason': 'dublado=False'}
+                
                 video_url = item.get('video_url')
                 if video_url:
-                    logger.info(f"video_url já existe no JSON: {video_url[:80]}...")
+                    logger.info(f"video_url encontrada no JSON: {video_url[:80]}...")
                     return video_url
                 else:
                     logger.info("Registro encontrado mas video_url está vazio")
@@ -94,45 +83,111 @@ def verificar_video_url_existente(url_pagina):
         return None
             
     except Exception as e:
-        logger.error(f"Erro ao verificar video_url no JSON: {e}")
+        logger.error(f"Erro ao buscar video_url no JSON: {e}")
         return None
 
-def atualizar_video_url_json(url_pagina, video_url):
-    """
-    Atualiza ou adiciona o campo video_url no arquivo JSON
-    
-    Args:
-        url_pagina: URL da página do Warezcdn
-        video_url: URL do vídeo extraída
-        
-    Returns:
-        bool: True se atualizado com sucesso, False caso contrário
-    """
+def atualizar_json(url_pagina, video_url, dublado=None):
+    """Atualiza ou adiciona o registro no arquivo JSON"""
     try:
         data = carregar_json()
         
-        # Procurar se a URL já existe
         encontrado = False
         for item in data:
             if item.get('url') == url_pagina:
-                item['video_url'] = video_url
+                if video_url is not None:
+                    item['video_url'] = video_url
+                if dublado is not None:
+                    item['dublado'] = dublado
                 encontrado = True
-                logger.info(f"video_url atualizada no JSON")
+                logger.info(f"Registro atualizado no JSON")
                 break
         
-        # Se não existe, adicionar novo registro
         if not encontrado:
-            data.append({
-                'url': url_pagina,
-                'video_url': video_url
-            })
+            novo_item = {'url': url_pagina}
+            if video_url is not None:
+                novo_item['video_url'] = video_url
+            if dublado is not None:
+                novo_item['dublado'] = dublado
+            
+            data.append(novo_item)
             logger.info(f"Novo registro adicionado ao JSON")
         
         return salvar_json(data)
         
     except Exception as e:
-        logger.error(f"Erro ao atualizar video_url no JSON: {e}")
+        logger.error(f"Erro ao atualizar JSON: {e}")
         return False
+
+def download_geckodriver():
+    """Baixa o geckodriver diretamente sem usar a API do GitHub"""
+    if not os.path.exists(DRIVERS_DIR):
+        os.makedirs(DRIVERS_DIR)
+        logger.info(f"Diretório de drivers criado: {DRIVERS_DIR}")
+    
+    if os.path.exists(GECKODRIVER_PATH):
+        logger.info(f"GeckoDriver já existe: {GECKODRIVER_PATH}")
+        return GECKODRIVER_PATH
+    
+    logger.info("Baixando GeckoDriver...")
+    
+    try:
+        # Detectar sistema operacional
+        system = platform.system()
+        machine = platform.machine().lower()
+        
+        # URL direta para a versão 0.35.0 (última estável)
+        if system == 'Windows':
+            if '64' in machine or 'amd64' in machine:
+                url = "https://github.com/mozilla/geckodriver/releases/download/v0.35.0/geckodriver-v0.35.0-win64.zip"
+                driver_file = "geckodriver.exe"
+            else:
+                url = "https://github.com/mozilla/geckodriver/releases/download/v0.35.0/geckodriver-v0.35.0-win32.zip"
+                driver_file = "geckodriver.exe"
+        elif system == 'Linux':
+            if 'aarch64' in machine or 'arm64' in machine:
+                url = "https://github.com/mozilla/geckodriver/releases/download/v0.35.0/geckodriver-v0.35.0-linux-aarch64.tar.gz"
+            else:
+                url = "https://github.com/mozilla/geckodriver/releases/download/v0.35.0/geckodriver-v0.35.0-linux64.tar.gz"
+            driver_file = "geckodriver"
+        elif system == 'Darwin':  # macOS
+            if 'arm64' in machine:
+                url = "https://github.com/mozilla/geckodriver/releases/download/v0.35.0/geckodriver-v0.35.0-macos-aarch64.tar.gz"
+            else:
+                url = "https://github.com/mozilla/geckodriver/releases/download/v0.35.0/geckodriver-v0.35.0-macos.tar.gz"
+            driver_file = "geckodriver"
+        else:
+            raise Exception(f"Sistema operacional não suportado: {system}")
+        
+        logger.info(f"Baixando de: {url}")
+        response = requests.get(url, timeout=60)
+        response.raise_for_status()
+        
+        # Salvar arquivo temporário
+        temp_file = os.path.join(DRIVERS_DIR, "geckodriver_temp")
+        with open(temp_file, 'wb') as f:
+            f.write(response.content)
+        
+        # Extrair arquivo
+        if url.endswith('.zip'):
+            with zipfile.ZipFile(temp_file, 'r') as zip_ref:
+                zip_ref.extractall(DRIVERS_DIR)
+        else:
+            with tarfile.open(temp_file, 'r:gz') as tar_ref:
+                tar_ref.extractall(DRIVERS_DIR)
+        
+        # Remover arquivo temporário
+        os.remove(temp_file)
+        
+        # Dar permissão de execução no Linux/macOS
+        if system != 'Windows':
+            os.chmod(GECKODRIVER_PATH, 0o755)
+        
+        logger.info(f"GeckoDriver baixado com sucesso: {GECKODRIVER_PATH}")
+        return GECKODRIVER_PATH
+        
+    except Exception as e:
+        logger.error(f"Erro ao baixar GeckoDriver: {e}")
+        raise
 
 def download_ublock_origin():
     """Baixa a extensão uBlock Origin se não existir"""
@@ -190,7 +245,10 @@ def criar_navegador_firefox_com_ublock():
     options.set_preference("dom.push.enabled", False)
     
     try:
-        service = Service(GeckoDriverManager().install())
+        # Baixar geckodriver se necessário
+        geckodriver_path = download_geckodriver()
+        
+        service = Service(geckodriver_path)
         service.service_args = ['--log', 'fatal', '--marionette-port', '0']
         
         driver = webdriver.Firefox(service=service, options=options)
@@ -255,7 +313,6 @@ def click_center_page(driver, driver_id):
 def try_click_player(driver, driver_id):
     """Tenta clicar no player usando 3 estratégias"""
     
-    # Estratégia 1: button.vjs-big-play-button
     logger.info(f"[{driver_id}] Estratégia 1: Procurando button.vjs-big-play-button")
     try:
         play_button = WebDriverWait(driver, 5).until(
@@ -271,7 +328,6 @@ def try_click_player(driver, driver_id):
     except Exception as e:
         logger.warning(f"[{driver_id}] Estratégia 1 falhou: {e}")
     
-    # Estratégia 2: span com texto "Play Video"
     logger.info(f"[{driver_id}] Estratégia 2: Procurando span 'Play Video'")
     try:
         play_span = driver.find_element(By.XPATH, "//span[contains(text(), 'Play Video')]")
@@ -283,7 +339,6 @@ def try_click_player(driver, driver_id):
     except Exception as e:
         logger.warning(f"[{driver_id}] Estratégia 2 falhou: {e}")
     
-    # Estratégia 3: Clique no centro
     logger.info(f"[{driver_id}] Estratégia 3: Clicando no centro")
     try:
         if click_center_page(driver, driver_id):
@@ -295,7 +350,7 @@ def try_click_player(driver, driver_id):
     return False
 
 def wait_for_video_playing(driver, driver_id, max_wait=15):
-    """Aguarda o vídeo começar a reproduzir (classe vjs-playing)"""
+    """Aguarda o vídeo começar a reproduzir"""
     logger.info(f"[{driver_id}] Aguardando vídeo começar a reproduzir...")
     start_wait = time.time()
     
@@ -305,7 +360,7 @@ def wait_for_video_playing(driver, driver_id, max_wait=15):
             classes = player_element.get_attribute('class')
             
             if 'vjs-playing' in classes:
-                logger.info(f"[{driver_id}] Vídeo está reproduzindo (vjs-playing detectado)")
+                logger.info(f"[{driver_id}] Vídeo está reproduzindo")
                 return True
         except Exception as e:
             logger.debug(f"[{driver_id}] Erro ao verificar vjs-playing: {e}")
@@ -316,280 +371,222 @@ def wait_for_video_playing(driver, driver_id, max_wait=15):
     return False
 
 def extrair_url_video(url, driver_id):
-    """
-    Extrai a URL do vídeo de uma página do Warezcdn
-    Verifica primeiro se já existe no arquivo JSON
+    """Extrai a URL do vídeo de uma página do Warezcdn"""
     
-    Args:
-        url: URL da página do Warezcdn (filme ou série)
-        driver_id: ID para logging
-        
-    Returns:
-        dict: {'success': True, 'video_url': 'url', 'from_cache': bool} ou {'success': False, 'error': 'mensagem'}
-    """
-    # Verificar primeiro se já existe no JSON
     logger.info(f"[{driver_id}] Verificando se video_url já existe no JSON...")
-    video_url_existente = verificar_video_url_existente(url)
+    resultado_busca = buscar_video_url_json(url)
     
-    if video_url_existente:
+    # Se é um dict com 'skip', não extrai
+    if isinstance(resultado_busca, dict) and resultado_busca.get('skip'):
+        logger.info(f"[{driver_id}] Extração pulada: {resultado_busca.get('reason')}")
+        return {
+            'success': False,
+            'skipped': True,
+            'reason': resultado_busca.get('reason'),
+            'extraction_time': '0.00s'
+        }
+    
+    # Se encontrou video_url válida
+    if resultado_busca and isinstance(resultado_busca, str):
         logger.info(f"[{driver_id}] video_url encontrada no cache do JSON")
         return {
             'success': True, 
-            'video_url': video_url_existente,
+            'video_url': resultado_busca,
             'from_cache': True,
             'extraction_time': '0.00s'
         }
     
-    # Se não existe, fazer extração
     logger.info(f"[{driver_id}] video_url não encontrada, iniciando extração...")
     start_time = time.time()
     driver = None
+    dublado = None  # Padrão é nulo
     
     try:
         driver = criar_navegador_firefox_com_ublock()
         logger.info(f"[{driver_id}] Iniciando extração: {url}")
         
-        # Passo 1: Navegar
         logger.info(f"[{driver_id}] 1. Navegando para a página...")
         driver.get(url)
         time.sleep(3)
         
-        # Passo 2: Audio-selector (OPCIONAL - se não achar, pula para server-selector)
-        logger.info(f"[{driver_id}] 2. Procurando audio-selector (mixdrop, lang=2)...")
+        logger.info(f"[{driver_id}] 2. Procurando audio-selector...")
         try:
-            audio_selectors = [
-                'audio-selector[data-lang="2"]',
-            ]
-            
+            audio_selectors = ['audio-selector[data-lang="2"]']
             audio_selector = None
             for selector in audio_selectors:
                 try:
                     audio_selector = WebDriverWait(driver, 5).until(
                         EC.presence_of_element_located((By.CSS_SELECTOR, selector))
                     )
-                    logger.info(f"[{driver_id}] Audio-selector encontrado: {selector}")
+                    logger.info(f"[{driver_id}] Audio-selector encontrado")
                     break
                 except:
                     continue
             
             if audio_selector:
                 if mouse_click(driver, audio_selector, driver_id):
-                    logger.info(f"[{driver_id}] Audio-selector clicado com sucesso")
+                    logger.info(f"[{driver_id}] Audio-selector clicado")
                     time.sleep(2)
-                else:
-                    logger.warning(f"[{driver_id}] Falha ao clicar no audio-selector")
-            else:
-                logger.warning(f"[{driver_id}] Audio-selector não encontrado - pulando para server-selector")
-            
         except Exception as e:
-            logger.warning(f"[{driver_id}] Erro com audio-selector (não crítico): {e}")
+            logger.warning(f"[{driver_id}] Erro com audio-selector: {e}")
         
-        # Passo 3: Server-selector (OBRIGATÓRIO)
-        logger.info(f"[{driver_id}] 3. Procurando server-selector (mixdrop, lang=2)...")
-        try:
-            server_selectors = [
-                'server-selector[data-server="mixdrop"][data-lang="2"]',
-                'server-selector[data-lang="2"]'
-            ]
-            
-            server_selector = None
-            for selector in server_selectors:
-                try:
-                    server_selector = WebDriverWait(driver, 5).until(
-                        EC.presence_of_element_located((By.CSS_SELECTOR, selector))
-                    )
-                    logger.info(f"[{driver_id}] Server-selector encontrado: {selector}")
-                    break
-                except:
-                    continue
-            
-            if not server_selector:
-                raise Exception("Server-selector não encontrado")
-            
-            if not mouse_click(driver, server_selector, driver_id):
-                raise Exception("Falha ao clicar no server-selector")
-            
-            time.sleep(2)
-            
-        except Exception as e:
-            logger.error(f"[{driver_id}] Erro com server-selector: {e}")
-            return {'success': False, 'error': f'Erro com server-selector: {str(e)}'}
+        logger.info(f"[{driver_id}] 3. Procurando server-selector...")
+        server_selectors = [
+            'server-selector[data-server="mixdrop"][data-lang="2"]',
+            'server-selector[data-lang="2"]'
+        ]
         
-        # Passo 4: Aguardar
+        server_selector = None
+        for selector in server_selectors:
+            try:
+                server_selector = WebDriverWait(driver, 5).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, selector))
+                )
+                logger.info(f"[{driver_id}] Server-selector encontrado")
+                break
+            except:
+                continue
+        
+        if not server_selector:
+            logger.warning(f"[{driver_id}] Server-selector não encontrado - conteúdo não dublado")
+            # Marca como False no JSON para não tentar extrair novamente
+            dublado = False
+            atualizar_json(url, None, dublado)
+            raise Exception("Server-selector não encontrado - não dublado")
+        
+        if not mouse_click(driver, server_selector, driver_id):
+            raise Exception("Falha ao clicar no server-selector")
+        
+        time.sleep(2)
+        
         logger.info(f"[{driver_id}] 4. Aguardando 10 segundos...")
         time.sleep(10)
         
-        # Passo 5: Entrar nos iframes
-        logger.info(f"[{driver_id}] 5. Procurando iframes aninhados...")
+        logger.info(f"[{driver_id}] 5. Entrando nos iframes...")
         
-        try:
-            # Iframe PAI
-            logger.info(f"[{driver_id}] Procurando iframe PAI (embedcontent)...")
-            parent_iframe_selectors = [
-                'embedcontent.active iframe',
-                'embedcontent iframe',
-                'iframe[src*="getEmbed"]'
-            ]
-            
-            parent_iframe = None
-            for selector in parent_iframe_selectors:
-                try:
-                    parent_iframe = WebDriverWait(driver, 5).until(
-                        EC.presence_of_element_located((By.CSS_SELECTOR, selector))
-                    )
-                    logger.info(f"[{driver_id}] Iframe PAI encontrado: {selector}")
-                    break
-                except:
-                    continue
-            
-            if not parent_iframe:
-                raise Exception("Iframe PAI não encontrado")
-            
-            driver.switch_to.frame(parent_iframe)
-            logger.info(f"[{driver_id}] Entrou no iframe PAI")
-            time.sleep(2)
-            
-            # Iframe FILHO
-            logger.info(f"[{driver_id}] Procurando iframe FILHO (mixdrop)...")
-            child_iframe_selectors = [
-                'iframe[src*="mixdrop"]',
-                'iframe#player',
-                'iframe'
-            ]
-            
-            child_iframe = None
-            for selector in child_iframe_selectors:
-                try:
-                    child_iframe = WebDriverWait(driver, 5).until(
-                        EC.presence_of_element_located((By.CSS_SELECTOR, selector))
-                    )
-                    logger.info(f"[{driver_id}] Iframe FILHO encontrado: {selector}")
-                    break
-                except:
-                    continue
-            
-            if not child_iframe:
-                raise Exception("Iframe FILHO não encontrado")
-            
-            driver.switch_to.frame(child_iframe)
-            logger.info(f"[{driver_id}] Entrou no iframe FILHO")
-            time.sleep(2)
-            
-        except Exception as e:
-            logger.error(f"[{driver_id}] Erro ao processar iframes: {e}")
-            return {'success': False, 'error': f'Erro ao processar iframes: {str(e)}'}
+        parent_iframe_selectors = [
+            'embedcontent.active iframe',
+            'embedcontent iframe',
+            'iframe[src*="getEmbed"]'
+        ]
         
-        # Passo 6: Aguardar player processar (10 segundos)
-        logger.info(f"[{driver_id}] 6. Aguardando 10 segundos para o player processar...")
+        parent_iframe = None
+        for selector in parent_iframe_selectors:
+            try:
+                parent_iframe = WebDriverWait(driver, 5).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, selector))
+                )
+                break
+            except:
+                continue
+        
+        if not parent_iframe:
+            raise Exception("Iframe PAI não encontrado")
+        
+        driver.switch_to.frame(parent_iframe)
+        time.sleep(2)
+        
+        child_iframe_selectors = [
+            'iframe[src*="mixdrop"]',
+            'iframe#player',
+            'iframe'
+        ]
+        
+        child_iframe = None
+        for selector in child_iframe_selectors:
+            try:
+                child_iframe = WebDriverWait(driver, 5).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, selector))
+                )
+                break
+            except:
+                continue
+        
+        if not child_iframe:
+            raise Exception("Iframe FILHO não encontrado")
+        
+        driver.switch_to.frame(child_iframe)
+        time.sleep(2)
+        
+        logger.info(f"[{driver_id}] 6. Aguardando player processar...")
         time.sleep(10)
         
-        # Passo 7: Remover elementos de popup/overlay
-        logger.info(f"[{driver_id}] 7. Removendo overlays/popups...")
+        logger.info(f"[{driver_id}] 7. Removendo overlays...")
         try:
-            removed_count = driver.execute_script("""
+            removed = driver.execute_script("""
                 var overlays = document.querySelectorAll('div[style*="position: absolute"][style*="z-index: 2147483646"]');
                 var count = overlays.length;
-                overlays.forEach(function(overlay) {
-                    overlay.remove();
-                });
+                overlays.forEach(o => o.remove());
                 return count;
             """)
-            logger.info(f"[{driver_id}] {removed_count} overlay(s) removido(s)")
-            time.sleep(1)
+            logger.info(f"[{driver_id}] {removed} overlay(s) removido(s)")
         except Exception as e:
             logger.warning(f"[{driver_id}] Erro ao remover overlays: {e}")
         
-        # Passo 8: Tentar clicar no player até funcionar
         logger.info(f"[{driver_id}] 8. Tentando clicar no player...")
-        video_playing = False
-        
         for attempt in range(3):
-            logger.info(f"[{driver_id}] Tentativa {attempt + 1} de clicar no player")
-            
             if try_click_player(driver, driver_id):
-                if wait_for_video_playing(driver, driver_id, max_wait=10):
-                    video_playing = True
-                    logger.info(f"[{driver_id}] Vídeo reproduzindo após tentativa {attempt + 1}")
-                    logger.info(f"[{driver_id}] Aguardando 10 segundos após início da reprodução...")
+                if wait_for_video_playing(driver, driver_id):
                     time.sleep(10)
                     break
-                else:
-                    logger.warning(f"[{driver_id}] Vídeo não reproduziu após tentativa {attempt + 1}")
-            
             time.sleep(2)
         
-        if not video_playing:
-            logger.warning(f"[{driver_id}] Vídeo não começou a reproduzir")
-        
-        # Passo 9: Buscar URL do vídeo
         logger.info(f"[{driver_id}] 9. Procurando URL do vídeo...")
         
         max_wait = 30
         start_search = time.time()
-        video_url = None
         
         while time.time() - start_search < max_wait:
             try:
                 video_url = driver.execute_script("""
                     var video = document.getElementById('videojs_html5_api');
-                    if (video) {
-                        if (video.currentSrc) {
-                            return video.currentSrc;
-                        }
-                        if (video.src) {
-                            return video.src;
-                        }
+                    if (video && (video.currentSrc || video.src)) {
+                        return video.currentSrc || video.src;
                     }
-                    
                     var videos = document.querySelectorAll('video');
                     for (var i = 0; i < videos.length; i++) {
-                        if (videos[i].currentSrc) {
-                            return videos[i].currentSrc;
-                        }
-                        if (videos[i].src) {
-                            return videos[i].src;
+                        if (videos[i].currentSrc || videos[i].src) {
+                            return videos[i].currentSrc || videos[i].src;
                         }
                     }
-                    
                     return null;
                 """)
                 
-                if video_url and len(video_url) > 10 and ('http' in video_url or '//' in video_url):
+                if video_url and len(video_url) > 10:
                     elapsed = time.time() - start_time
-                    logger.info(f"[{driver_id}] URL encontrada em {elapsed:.2f}s")
-                    logger.info(f"[{driver_id}] URL: {video_url[:80]}...")
+                    logger.info(f"[{driver_id}] URL encontrada!")
                     
-                    # Atualizar arquivo JSON
-                    logger.info(f"[{driver_id}] Atualizando arquivo JSON...")
-                    atualizar_video_url_json(url, video_url)
+                    # Marca como dublado apenas quando extrai a URL com sucesso
+                    dublado = True
+                    
+                    # Salva no JSON
+                    atualizar_json(url, video_url, dublado)
                     
                     return {
                         'success': True, 
                         'video_url': video_url, 
                         'from_cache': False,
-                        'extraction_time': f"{elapsed:.2f}s"
+                        'extraction_time': f"{elapsed:.2f}s",
+                        'dublado': dublado
                     }
                 
                 time.sleep(2)
-                
             except Exception as e:
-                logger.debug(f"[{driver_id}] Erro na busca: {e}")
                 time.sleep(2)
         
-        logger.error(f"[{driver_id}] URL não encontrada")
-        return {'success': False, 'error': 'URL do vídeo não encontrada'}
+        return {'success': False, 'error': 'URL do vídeo não encontrada', 'dublado': dublado}
         
     except Exception as e:
         logger.error(f"[{driver_id}] Erro durante extração: {e}")
-        return {'success': False, 'error': str(e)}
+        return {'success': False, 'error': str(e), 'dublado': dublado}
     
     finally:
         if driver:
             try:
                 driver.quit()
-                logger.info(f"[{driver_id}] Driver fechado")
-            except Exception as e:
-                logger.error(f"[{driver_id}] Erro ao fechar driver: {e}")
+            except:
+                pass
 
-# Baixar uBlock Origin na inicialização do módulo
+# Inicialização
 download_ublock_origin()
+download_geckodriver()
