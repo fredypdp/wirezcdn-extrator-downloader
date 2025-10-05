@@ -392,6 +392,10 @@ def criar_navegador_firefox_com_ublock():
     
     options.set_preference("dom.webnotifications.enabled", False)
     options.set_preference("dom.push.enabled", False)
+
+    # Mutar o áudio do navegador
+    options.set_preference("media.volume_scale", "0.0")
+    options.set_preference("media.default_volume", "0.0")
     
     try:
         # Baixar geckodriver se necessário
