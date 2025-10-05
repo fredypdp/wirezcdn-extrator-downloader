@@ -3,6 +3,7 @@
 /venv
 /downloads
 /downloads_temp
+/__pycache__
 
 # dependencies
 /node_modules

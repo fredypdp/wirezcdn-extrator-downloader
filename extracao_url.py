@@ -2,6 +2,7 @@ import time
 import logging
 import os
 import json
+from dotenv import load_dotenv
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -28,8 +29,19 @@ UBLOCK_XPI = os.path.join(EXTENSIONS_DIR, 'ublock_origin.xpi')
 DRIVERS_DIR = os.path.join(os.getcwd(), 'drivers')
 GECKODRIVER_PATH = os.path.join(DRIVERS_DIR, 'geckodriver.exe' if platform.system() == 'Windows' else 'geckodriver')
 
-# Arquivo JSON para armazenar URLs
+# Arquivo JSON para armazenar URLs (apenas leitura)
 JSON_FILE = os.path.join(os.getcwd(), 'url_extraidas_filmes.json')
+
+# Carregar as variáveis de ambiente do arquivo .env
+load_dotenv()
+
+# Configuração Supabase
+SUPABASE_URL = "https://forfhjlkrqjpglfbiosd.supabase.co"
+SUPABASE_APIKEY = os.getenv("SUPABASE_APIKEY")
+SUPABASE_TABLE = "filmes_url_warezcdn"
+
+if not SUPABASE_APIKEY:
+    logger.error("SUPABASE_APIKEY não encontrada nas variáveis de ambiente!")
 
 def carregar_json():
     """Carrega o arquivo JSON com as URLs extraídas"""
@@ -85,6 +97,105 @@ def buscar_video_url_json(url_pagina):
     except Exception as e:
         logger.error(f"Erro ao buscar video_url no JSON: {e}")
         return None
+
+def atualizar_supabase(url_pagina, video_url, dublado=True):
+    """Atualiza ou cria registro no Supabase"""
+    try:
+        headers = {
+            "apikey": SUPABASE_APIKEY,
+            "Authorization": f"Bearer {SUPABASE_APIKEY}",
+            "Content-Type": "application/json",
+            "Prefer": "return=minimal"
+        }
+        
+        # Primeiro tenta atualizar
+        params = {
+            "url": f"eq.{url_pagina}"
+        }
+        
+        data = {
+            "video_url": video_url,
+            "dublado": dublado
+        }
+        
+        response = requests.patch(
+            f"{SUPABASE_URL}/rest/v1/{SUPABASE_TABLE}",
+            headers=headers,
+            params=params,
+            json=data,
+            timeout=10
+        )
+        
+        if response.status_code == 204:
+            logger.info(f"Registro atualizado no Supabase")
+            return True
+        elif response.status_code == 200:
+            logger.info(f"Registro atualizado no Supabase")
+            return True
+        else:
+            # Se falhou ao atualizar, tenta criar
+            logger.info(f"Nenhum registro atualizado, tentando criar novo...")
+            
+            data = {
+                "url": url_pagina,
+                "video_url": video_url,
+                "dublado": dublado
+            }
+            
+            response = requests.post(
+                f"{SUPABASE_URL}/rest/v1/{SUPABASE_TABLE}",
+                headers=headers,
+                json=data,
+                timeout=10
+            )
+            
+            if response.status_code in [200, 201, 204]:
+                logger.info(f"Novo registro criado no Supabase")
+                return True
+            else:
+                logger.error(f"Erro ao criar no Supabase: {response.status_code} - {response.text}")
+                return False
+        
+    except Exception as e:
+        logger.error(f"Erro ao atualizar Supabase: {e}")
+        return False
+
+def atualizar_dublado_supabase(url_pagina, dublado):
+    """Atualiza apenas o campo dublado no Supabase"""
+    try:
+        headers = {
+            "apikey": SUPABASE_APIKEY,
+            "Authorization": f"Bearer {SUPABASE_APIKEY}",
+            "Content-Type": "application/json",
+            "Prefer": "return=minimal"
+        }
+        
+        params = {
+            "url": f"eq.{url_pagina}"
+        }
+        
+        data = {
+            "dublado": dublado
+        }
+        
+        response = requests.patch(
+            f"{SUPABASE_URL}/rest/v1/{SUPABASE_TABLE}",
+            headers=headers,
+            params=params,
+            json=data,
+            timeout=10
+        )
+        
+        if response.status_code in [200, 204]:
+            logger.info(f"Campo 'dublado' atualizado para {dublado} no Supabase")
+            return True
+        else:
+            logger.error(f"Erro ao atualizar dublado: {response.status_code} - {response.text}")
+            return False
+        
+    except Exception as e:
+        logger.error(f"Erro ao atualizar campo dublado: {e}")
+        return False
 
 def atualizar_json(url_pagina, video_url, dublado=None):
     """Atualiza ou adiciona o registro no arquivo JSON"""
@@ -449,8 +560,9 @@ def extrair_url_video(url, driver_id):
         
         if not server_selector:
             logger.warning(f"[{driver_id}] Server-selector não encontrado - conteúdo não dublado")
-            # Marca como False no JSON para não tentar extrair novamente
+            # Marca como False no Supabase e JSON para não tentar extrair novamente
             dublado = False
+            atualizar_supabase(url, None, dublado)
             atualizar_json(url, None, dublado)
             raise Exception("Server-selector não encontrado - não dublado")
         
@@ -558,6 +670,9 @@ def extrair_url_video(url, driver_id):
                     
                     # Marca como dublado apenas quando extrai a URL com sucesso
                     dublado = True
+                    
+                    # Salva no Supabase
+                    atualizar_supabase(url, video_url, dublado)
                     
                     # Salva no JSON
                     atualizar_json(url, video_url, dublado)
