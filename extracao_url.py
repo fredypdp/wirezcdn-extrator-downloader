@@ -98,6 +98,40 @@ def buscar_video_url_json(url_pagina):
         logger.error(f"Erro ao buscar video_url no JSON: {e}")
         return None
 
+def verificar_existe_supabase(url_pagina):
+    """Verifica se o registro existe no Supabase"""
+    try:
+        headers = {
+            "apikey": SUPABASE_APIKEY,
+            "Authorization": f"Bearer {SUPABASE_APIKEY}",
+            "Content-Type": "application/json"
+        }
+        
+        params = {
+            "select": "url",
+            "url": f"eq.{url_pagina}"
+        }
+        
+        response = requests.get(
+            f"{SUPABASE_URL}/rest/v1/{SUPABASE_TABLE}",
+            headers=headers,
+            params=params,
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            existe = data and len(data) > 0
+            logger.info(f"Registro {'existe' if existe else 'não existe'} no Supabase")
+            return existe
+        else:
+            logger.error(f"Erro ao verificar existência no Supabase: {response.status_code}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Erro ao verificar existência no Supabase: {e}")
+        return False
+
 def atualizar_supabase(url_pagina, video_url, dublado=True):
     """Atualiza ou cria registro no Supabase"""
     try:
@@ -108,34 +142,38 @@ def atualizar_supabase(url_pagina, video_url, dublado=True):
             "Prefer": "return=minimal"
         }
         
-        # Primeiro tenta atualizar
-        params = {
-            "url": f"eq.{url_pagina}"
-        }
+        # Verifica se o registro existe
+        existe = verificar_existe_supabase(url_pagina)
         
-        data = {
-            "video_url": video_url,
-            "dublado": dublado
-        }
-        
-        response = requests.patch(
-            f"{SUPABASE_URL}/rest/v1/{SUPABASE_TABLE}",
-            headers=headers,
-            params=params,
-            json=data,
-            timeout=10
-        )
-        
-        if response.status_code == 204:
-            logger.info(f"Registro atualizado no Supabase")
-            return True
-        elif response.status_code == 200:
-            logger.info(f"Registro atualizado no Supabase")
-            return True
-        else:
-            # Se falhou ao atualizar, tenta criar
-            logger.info(f"Nenhum registro atualizado, tentando criar novo...")
+        if existe:
+            # Registro existe - usa PATCH para atualizar
+            logger.info("Registro existe, usando PATCH para atualizar...")
+            params = {
+                "url": f"eq.{url_pagina}"
+            }
             
+            data = {
+                "video_url": video_url,
+                "dublado": dublado
+            }
+            
+            response = requests.patch(
+                f"{SUPABASE_URL}/rest/v1/{SUPABASE_TABLE}",
+                headers=headers,
+                params=params,
+                json=data,
+                timeout=10
+            )
+            
+            if response.status_code in [200, 204]:
+                logger.info(f"Registro atualizado no Supabase com sucesso")
+                return True
+            else:
+                logger.error(f"Erro ao atualizar no Supabase: {response.status_code} - {response.text}")
+                return False
+        else:
+            # Registro não existe - usa POST para criar
+            logger.info("Registro não existe, usando POST para criar...")
             data = {
                 "url": url_pagina,
                 "video_url": video_url,
@@ -150,7 +188,7 @@ def atualizar_supabase(url_pagina, video_url, dublado=True):
             )
             
             if response.status_code in [200, 201, 204]:
-                logger.info(f"Novo registro criado no Supabase")
+                logger.info(f"Novo registro criado no Supabase com sucesso")
                 return True
             else:
                 logger.error(f"Erro ao criar no Supabase: {response.status_code} - {response.text}")
