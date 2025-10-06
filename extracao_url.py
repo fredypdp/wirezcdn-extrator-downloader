@@ -1,7 +1,6 @@
 import time
 import logging
 import os
-import json
 from dotenv import load_dotenv
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -29,9 +28,6 @@ UBLOCK_XPI = os.path.join(EXTENSIONS_DIR, 'ublock_origin.xpi')
 DRIVERS_DIR = os.path.join(os.getcwd(), 'drivers')
 GECKODRIVER_PATH = os.path.join(DRIVERS_DIR, 'geckodriver.exe' if platform.system() == 'Windows' else 'geckodriver')
 
-# Arquivo JSON para armazenar URLs (apenas leitura)
-JSON_FILE = os.path.join(os.getcwd(), 'url_extraidas_filmes.json')
-
 # Carregar as variáveis de ambiente do arquivo .env
 load_dotenv()
 
@@ -43,59 +39,65 @@ SUPABASE_TABLE = "filmes_url_warezcdn"
 if not SUPABASE_APIKEY:
     logger.error("SUPABASE_APIKEY não encontrada nas variáveis de ambiente!")
 
-def carregar_json():
-    """Carrega o arquivo JSON com as URLs extraídas"""
+def buscar_dados_supabase(url_pagina):
+    """Busca os dados completos do registro no Supabase pela URL da página"""
     try:
-        if os.path.exists(JSON_FILE):
-            with open(JSON_FILE, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                logger.info(f"JSON carregado com {len(data)} registros")
-                return data
-        else:
-            logger.info("Arquivo JSON não existe, criando novo")
-            return []
-    except Exception as e:
-        logger.error(f"Erro ao carregar JSON: {e}")
-        return []
-
-def salvar_json(data):
-    """Salva os dados no arquivo JSON"""
-    try:
-        with open(JSON_FILE, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=4)
-        logger.info(f"JSON salvo com {len(data)} registros")
-        return True
-    except Exception as e:
-        logger.error(f"Erro ao salvar JSON: {e}")
-        return False
-
-def buscar_video_url_json(url_pagina):
-    """Busca video_url no JSON pela URL da página e verifica se dublado é False"""
-    try:
-        data = carregar_json()
+        headers = {
+            "apikey": SUPABASE_APIKEY,
+            "Authorization": f"Bearer {SUPABASE_APIKEY}",
+            "Content-Type": "application/json"
+        }
         
-        for item in data:
-            if item.get('url') == url_pagina:
-                dublado = item.get('dublado')
+        params = {
+            "select": "url,video_url,dublado",
+            "url": f"eq.{url_pagina}"
+        }
+        
+        response = requests.get(
+            f"{SUPABASE_URL}/rest/v1/{SUPABASE_TABLE}",
+            headers=headers,
+            params=params,
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            if data and len(data) > 0:
+                registro = data[0]
+                logger.info(f"Registro encontrado no Supabase")
                 
-                # Se dublado é False, não extrai
-                if dublado is False:
-                    logger.info(f"Registro com dublado=False encontrado - pulando extração")
+                # CASO 1: dublado=False - sempre pula
+                if registro.get('dublado') is False:
+                    logger.info("Registro com dublado=False - pulando extração")
                     return {'skip': True, 'reason': 'dublado=False'}
                 
-                video_url = item.get('video_url')
-                if video_url:
-                    logger.info(f"video_url encontrada no JSON: {video_url[:80]}...")
-                    return video_url
-                else:
-                    logger.info("Registro encontrado mas video_url está vazio")
-                    return None
-        
-        logger.info("URL não encontrada no JSON")
+                # CASO 2: dublado=True E video_url preenchido - pula e retorna URL do cache
+                if registro.get('dublado') is True and registro.get('video_url'):
+                    logger.info(f"video_url encontrada e dublado=True: {registro.get('video_url')[:80]}...")
+                    return registro.get('video_url')
+                
+                # CASO 3: video_url existe mas dublado não é True (None ou outro valor)
+                # Retorna o video_url existente
+                if registro.get('video_url'):
+                    logger.info(f"video_url encontrada: {registro.get('video_url')[:80]}...")
+                    return registro.get('video_url')
+                
+                # CASO 4: registro existe mas video_url está vazio - permite extração
+                logger.info("Registro existe mas video_url está vazio - permitindo extração")
+                return None
+            else:
+                logger.info("URL não encontrada no Supabase")
+                return None
+        else:
+            logger.error(f"Erro ao buscar no Supabase: {response.status_code}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"Erro ao buscar dados no Supabase: {e}")
         return None
             
     except Exception as e:
-        logger.error(f"Erro ao buscar video_url no JSON: {e}")
+        logger.error(f"Erro ao buscar dados no Supabase: {e}")
         return None
 
 def verificar_existe_supabase(url_pagina):
@@ -196,75 +198,6 @@ def atualizar_supabase(url_pagina, video_url, dublado=True):
         
     except Exception as e:
         logger.error(f"Erro ao atualizar Supabase: {e}")
-        return False
-
-def atualizar_dublado_supabase(url_pagina, dublado):
-    """Atualiza apenas o campo dublado no Supabase"""
-    try:
-        headers = {
-            "apikey": SUPABASE_APIKEY,
-            "Authorization": f"Bearer {SUPABASE_APIKEY}",
-            "Content-Type": "application/json",
-            "Prefer": "return=minimal"
-        }
-        
-        params = {
-            "url": f"eq.{url_pagina}"
-        }
-        
-        data = {
-            "dublado": dublado
-        }
-        
-        response = requests.patch(
-            f"{SUPABASE_URL}/rest/v1/{SUPABASE_TABLE}",
-            headers=headers,
-            params=params,
-            json=data,
-            timeout=10
-        )
-        
-        if response.status_code in [200, 204]:
-            logger.info(f"Campo 'dublado' atualizado para {dublado} no Supabase")
-            return True
-        else:
-            logger.error(f"Erro ao atualizar dublado: {response.status_code} - {response.text}")
-            return False
-        
-    except Exception as e:
-        logger.error(f"Erro ao atualizar campo dublado: {e}")
-        return False
-
-def atualizar_json(url_pagina, video_url, dublado=None):
-    """Atualiza ou adiciona o registro no arquivo JSON"""
-    try:
-        data = carregar_json()
-        
-        encontrado = False
-        for item in data:
-            if item.get('url') == url_pagina:
-                if video_url is not None:
-                    item['video_url'] = video_url
-                if dublado is not None:
-                    item['dublado'] = dublado
-                encontrado = True
-                logger.info(f"Registro atualizado no JSON")
-                break
-        
-        if not encontrado:
-            novo_item = {'url': url_pagina}
-            if video_url is not None:
-                novo_item['video_url'] = video_url
-            if dublado is not None:
-                novo_item['dublado'] = dublado
-            
-            data.append(novo_item)
-            logger.info(f"Novo registro adicionado ao JSON")
-        
-        return salvar_json(data)
-        
-    except Exception as e:
-        logger.error(f"Erro ao atualizar JSON: {e}")
         return False
 
 def download_geckodriver():
@@ -526,8 +459,8 @@ def wait_for_video_playing(driver, driver_id, max_wait=15):
 def extrair_url_video(url, driver_id):
     """Extrai a URL do vídeo de uma página do Warezcdn"""
     
-    logger.info(f"[{driver_id}] Verificando se video_url já existe no JSON...")
-    resultado_busca = buscar_video_url_json(url)
+    logger.info(f"[{driver_id}] Verificando se video_url já existe no Supabase...")
+    resultado_busca = buscar_dados_supabase(url)
     
     # Se é um dict com 'skip', não extrai
     if isinstance(resultado_busca, dict) and resultado_busca.get('skip'):
@@ -541,7 +474,7 @@ def extrair_url_video(url, driver_id):
     
     # Se encontrou video_url válida
     if resultado_busca and isinstance(resultado_busca, str):
-        logger.info(f"[{driver_id}] video_url encontrada no cache do JSON")
+        logger.info(f"[{driver_id}] video_url encontrada no Supabase (cache)")
         return {
             'success': True, 
             'video_url': resultado_busca,
@@ -602,10 +535,9 @@ def extrair_url_video(url, driver_id):
         
         if not server_selector:
             logger.warning(f"[{driver_id}] Server-selector não encontrado - conteúdo não dublado")
-            # Marca como False no Supabase e JSON para não tentar extrair novamente
+            # Marca como False no Supabase para não tentar extrair novamente
             dublado = False
             atualizar_supabase(url, None, dublado)
-            atualizar_json(url, None, dublado)
             raise Exception("Server-selector não encontrado - não dublado")
         
         if not mouse_click(driver, server_selector, driver_id):
@@ -715,9 +647,6 @@ def extrair_url_video(url, driver_id):
                     
                     # Salva no Supabase
                     atualizar_supabase(url, video_url, dublado)
-                    
-                    # Salva no JSON
-                    atualizar_json(url, video_url, dublado)
                     
                     return {
                         'success': True, 
