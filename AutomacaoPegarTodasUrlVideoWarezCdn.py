@@ -13,7 +13,7 @@ SUPABASE_APIKEY = os.getenv("SUPABASE_APIKEY")
 SUPABASE_TABLE = "filmes_url_warezcdn"
 
 def buscar_todos_registros_supabase():
-    """Busca todos os registros do Supabase com paginação de 1000 em 1000."""
+    """Busca todos os registros do Supabase onde dublado é nulo com paginação de 1000 em 1000."""
     todos_registros = []
     offset = 0
     limite = 1000
@@ -24,12 +24,13 @@ def buscar_todos_registros_supabase():
         "Content-Type": "application/json"
     }
     
-    print("🔄 Buscando registros do Supabase...")
+    print("📄 Buscando registros do Supabase (dublado=null)...")
     
     while True:
         try:
             params = {
                 "select": "url,video_url,dublado",
+                "dublado": "is.null",
                 "offset": offset,
                 "limit": limite
             }
