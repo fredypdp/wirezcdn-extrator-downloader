@@ -11,10 +11,10 @@ data = []
 with open(csv_filename, mode='r', encoding='utf-8') as csv_file:
     csv_reader = csv.DictReader(csv_file)
     for row in csv_reader:
-        # Extrair apenas as colunas 'url' e 'video_url'
+        # Extrair apenas as colunas 'url' e 'video_repro_url'
         obj = {
             'url': row['url'],
-            'video_url': row['video_url']
+            'video_repro_url': row['video_repro_url']
         }
         data.append(obj)
 

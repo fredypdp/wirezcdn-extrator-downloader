@@ -64,7 +64,7 @@ def extrair_video():
             logger.info(f"[{request_id}] Sucesso em {elapsed_time:.2f}s")
             return jsonify({
                 'success': True,
-                'video_url': resultado['video_url'],
+                'video_repro_url': resultado['video_repro_url'],
                 'from_cache': resultado.get('from_cache', False),
                 'processamento_tempo': f"{elapsed_time:.2f}s",
                 'extraction_time': resultado.get('extraction_time', f"{elapsed_time:.2f}s"),

@@ -29,7 +29,7 @@ def buscar_todos_registros_supabase():
     while True:
         try:
             params = {
-                "select": "url,video_url,dublado",
+                "select": "url,video_repro_url,dublado",
                 "dublado": "is.null",
                 "offset": offset,
                 "limit": limite
@@ -148,7 +148,7 @@ def processar_urls():
             
             # Verifica se teve sucesso
             elif resultado.get('success'):
-                video_url = resultado.get('video_url', '')
+                video_repro_url = resultado.get('video_repro_url', '')
                 from_cache = resultado.get('from_cache', False)
                 extraction_time = resultado.get('extraction_time', 'N/A')
                 dublado = resultado.get('dublado', None)
@@ -160,7 +160,7 @@ def processar_urls():
                     print(f"✓ SUCESSO (Extraído)")
                     stats['sucesso_extracao'] += 1
                 
-                print(f"  Video URL: {video_url[:80]}...")
+                print(f"  Video URL: {video_repro_url[:80]}...")
                 print(f"  Dublado: {dublado}")
                 print(f"  Tempo: {extraction_time}")
             

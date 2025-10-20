@@ -49,7 +49,7 @@ def buscar_dados_supabase(url_pagina):
         }
         
         params = {
-            "select": "url,video_url,dublado",
+            "select": "url,video_repro_url,dublado",
             "url": f"eq.{url_pagina}"
         }
         
@@ -71,19 +71,19 @@ def buscar_dados_supabase(url_pagina):
                     logger.info("Registro com dublado=False - pulando extração")
                     return {'skip': True, 'reason': 'dublado=False'}
                 
-                # CASO 2: dublado=True E video_url preenchido - pula e retorna URL do cache
-                if registro.get('dublado') is True and registro.get('video_url'):
-                    logger.info(f"video_url encontrada e dublado=True: {registro.get('video_url')[:80]}...")
-                    return registro.get('video_url')
+                # CASO 2: dublado=True E video_repro_url preenchido - pula e retorna URL do cache
+                if registro.get('dublado') is True and registro.get('video_repro_url'):
+                    logger.info(f"video_repro_url encontrada e dublado=True: {registro.get('video_repro_url')[:80]}...")
+                    return registro.get('video_repro_url')
                 
-                # CASO 3: video_url existe mas dublado não é True (None ou outro valor)
-                # Retorna o video_url existente
-                if registro.get('video_url'):
-                    logger.info(f"video_url encontrada: {registro.get('video_url')[:80]}...")
-                    return registro.get('video_url')
+                # CASO 3: video_repro_url existe mas dublado não é True (None ou outro valor)
+                # Retorna o video_repro_url existente
+                if registro.get('video_repro_url'):
+                    logger.info(f"video_repro_url encontrada: {registro.get('video_repro_url')[:80]}...")
+                    return registro.get('video_repro_url')
                 
-                # CASO 4: registro existe mas video_url está vazio - permite extração
-                logger.info("Registro existe mas video_url está vazio - permitindo extração")
+                # CASO 4: registro existe mas video_repro_url está vazio - permite extração
+                logger.info("Registro existe mas video_repro_url está vazio - permitindo extração")
                 return None
             else:
                 logger.info("URL não encontrada no Supabase")
@@ -134,7 +134,7 @@ def verificar_existe_supabase(url_pagina):
         logger.error(f"Erro ao verificar existência no Supabase: {e}")
         return False
 
-def atualizar_supabase(url_pagina, video_url, dublado=True):
+def atualizar_supabase(url_pagina, video_repro_url, dublado=True):
     """Atualiza ou cria registro no Supabase"""
     try:
         headers = {
@@ -155,7 +155,7 @@ def atualizar_supabase(url_pagina, video_url, dublado=True):
             }
             
             data = {
-                "video_url": video_url,
+                "video_repro_url": video_repro_url,
                 "dublado": dublado
             }
             
@@ -178,7 +178,7 @@ def atualizar_supabase(url_pagina, video_url, dublado=True):
             logger.info("Registro não existe, usando POST para criar...")
             data = {
                 "url": url_pagina,
-                "video_url": video_url,
+                "video_repro_url": video_repro_url,
                 "dublado": dublado
             }
             
@@ -459,7 +459,7 @@ def wait_for_video_playing(driver, driver_id, max_wait=15):
 def extrair_url_video(url, driver_id):
     """Extrai a URL do vídeo de uma página do Warezcdn"""
     
-    logger.info(f"[{driver_id}] Verificando se video_url já existe no Supabase...")
+    logger.info(f"[{driver_id}] Verificando se video_repro_url já existe no Supabase...")
     resultado_busca = buscar_dados_supabase(url)
     
     # Se é um dict com 'skip', não extrai
@@ -472,17 +472,17 @@ def extrair_url_video(url, driver_id):
             'extraction_time': '0.00s'
         }
     
-    # Se encontrou video_url válida
+    # Se encontrou video_repro_url válida
     if resultado_busca and isinstance(resultado_busca, str):
-        logger.info(f"[{driver_id}] video_url encontrada no Supabase (cache)")
+        logger.info(f"[{driver_id}] video_repro_url encontrada no Supabase (cache)")
         return {
             'success': True, 
-            'video_url': resultado_busca,
+            'video_repro_url': resultado_busca,
             'from_cache': True,
             'extraction_time': '0.00s'
         }
     
-    logger.info(f"[{driver_id}] video_url não encontrada, iniciando extração...")
+    logger.info(f"[{driver_id}] video_repro_url não encontrada, iniciando extração...")
     start_time = time.time()
     driver = None
     dublado = None  # Padrão é nulo
@@ -624,7 +624,7 @@ def extrair_url_video(url, driver_id):
         
         while time.time() - start_search < max_wait:
             try:
-                video_url = driver.execute_script("""
+                video_repro_url = driver.execute_script("""
                     var video = document.getElementById('videojs_html5_api');
                     if (video && (video.currentSrc || video.src)) {
                         return video.currentSrc || video.src;
@@ -638,7 +638,7 @@ def extrair_url_video(url, driver_id):
                     return null;
                 """)
                 
-                if video_url and len(video_url) > 10:
+                if video_repro_url and len(video_repro_url) > 10:
                     elapsed = time.time() - start_time
                     logger.info(f"[{driver_id}] URL encontrada!")
                     
@@ -646,11 +646,11 @@ def extrair_url_video(url, driver_id):
                     dublado = True
                     
                     # Salva no Supabase
-                    atualizar_supabase(url, video_url, dublado)
+                    atualizar_supabase(url, video_repro_url, dublado)
                     
                     return {
                         'success': True, 
-                        'video_url': video_url, 
+                        'video_repro_url': video_repro_url, 
                         'from_cache': False,
                         'extraction_time': f"{elapsed:.2f}s",
                         'dublado': dublado
