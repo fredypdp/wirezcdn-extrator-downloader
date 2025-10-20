@@ -185,7 +185,7 @@ def verificar_existe_filme_supabase(url_pagina):
         return None
 
 
-def verificar_existe_episodio_supabase(video_url, temporada, episodio):
+def verificar_existe_episodio_supabase(url, temporada, episodio):
     """Verifica se o episódio existe no Supabase"""
     try:
         headers = {
@@ -195,8 +195,8 @@ def verificar_existe_episodio_supabase(video_url, temporada, episodio):
         }
         
         params = {
-            "select": "video_url,temporada_numero,episodio_numero",
-            "video_url": f"eq.{video_url}",
+            "select": "url,temporada_numero,episodio_numero",
+            "url": f"eq.{url}",
             "temporada_numero": f"eq.{temporada}",
             "episodio_numero": f"eq.{episodio}"
         }
@@ -305,7 +305,7 @@ def criar_registro_filme_supabase(url_pagina, video_repro_url, dublado):
         return False
 
 
-def criar_episodio_supabase(video_url, temporada, episodio):
+def criar_episodio_supabase(url, temporada, episodio):
     """Cria um registro de episódio no Supabase"""
     try:
         headers = {
@@ -316,9 +316,9 @@ def criar_episodio_supabase(video_url, temporada, episodio):
         }
         
         data = {
-            "video_url": video_url,
-            "temporada_numero": temporada,
-            "episodio_numero": episodio
+            "url": url,
+            "temporada_numero": int(temporada),
+            "episodio_numero": int(episodio)
         }
         
         response = requests.post(
@@ -332,6 +332,8 @@ def criar_episodio_supabase(video_url, temporada, episodio):
             return True
         else:
             logger.error(f"✗ Erro ao criar episódio S{temporada}E{episodio}: {response.status_code}")
+            logger.error(f"   Resposta: {response.text}")
+            logger.error(f"   Dados enviados: {data}")
             return False
         
     except Exception as e:
