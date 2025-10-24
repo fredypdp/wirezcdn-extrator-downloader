@@ -14,7 +14,10 @@ with open(csv_filename, mode='r', encoding='utf-8') as csv_file:
         # Extrair apenas as colunas 'url' e 'video_repro_url'
         obj = {
             'url': row['url'],
-            'video_repro_url': row['video_repro_url']
+            'video_url': row['video_url'],
+            'video_repro_url': row['video_repro_url'],
+            'dublado': row['dublado'],
+            'subido_nuvem': row['subido_nuvem']
         }
         data.append(obj)
 
