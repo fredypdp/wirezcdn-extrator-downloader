@@ -2,7 +2,7 @@ import time
 import os
 import requests
 from dotenv import load_dotenv
-from extracao_url import extrair_url_video
+from extracao_url import extrair_url_video, limpar_driver_persistente
 
 # Carregar variáveis de ambiente
 load_dotenv()
@@ -35,6 +35,32 @@ def escolher_tipo_conteudo():
                 return 'series'
             else:
                 print("❌ Escolha inválida! Digite 1 para Filmes ou 2 para Séries.")
+        except Exception as e:
+            print(f"❌ Erro: {e}")
+
+def escolher_modo_driver():
+    """Permite o usuário escolher o modo de operação do driver."""
+    print(f"\n{'='*50}")
+    print("MODO DE OPERAÇÃO DO NAVEGADOR")
+    print(f"{'='*50}")
+    print("1 - Driver Persistente (Recomendado)")
+    print("    Mantém o navegador aberto, apenas alternando páginas")
+    print("    Mais rápido e eficiente para múltiplas extrações")
+    print("")
+    print("2 - Driver Novo a Cada Extração")
+    print("    Abre e fecha o navegador para cada URL")
+    print("    Mais lento, mas isola cada extração")
+    print(f"{'='*50}\n")
+    
+    while True:
+        try:
+            escolha = input("Escolha o modo (1 ou 2): ").strip()
+            if escolha == '1':
+                return True
+            elif escolha == '2':
+                return False
+            else:
+                print("❌ Escolha inválida! Digite 1 ou 2.")
         except Exception as e:
             print(f"❌ Erro: {e}")
 
@@ -205,6 +231,9 @@ def processar_urls():
     # Escolhe o tipo de conteúdo
     tipo_conteudo = escolher_tipo_conteudo()
     
+    # Escolhe o modo de operação do driver
+    usar_driver_persistente = escolher_modo_driver()
+    
     # Busca todos os registros do Supabase
     data = buscar_todos_registros_supabase(tipo_conteudo)
     
@@ -224,10 +253,13 @@ def processar_urls():
     # Seleciona o intervalo
     itens_selecionados = data[indice_inicio:indice_fim]
     
-    print(f"\n{'='*50}")
+    modo_texto = "PERSISTENTE (reutiliza navegador)" if usar_driver_persistente else "NORMAL (abre/fecha navegador)"
+    
+    print(f"\n{'='*60}")
     print(f"Processando {tipo_conteudo} de {inicio} até {fim} ({len(itens_selecionados)} itens)")
     print(f"Tabela: {TABELAS[tipo_conteudo]}")
-    print(f"{'='*50}\n")
+    print(f"Modo: {modo_texto}")
+    print(f"{'='*60}\n")
     
     # Estatísticas
     stats = {
@@ -239,100 +271,119 @@ def processar_urls():
         'total': len(itens_selecionados)
     }
     
-    # Processa cada item no intervalo
-    for idx, item in enumerate(itens_selecionados, start=inicio):
-        url_base = item.get('url', 'URL não encontrada')
-        
-        # Para séries, constrói a URL completa com temporada e episódio
-        if tipo_conteudo == 'series':
-            temporada = item.get('temporada_numero', '')
-            episodio = item.get('episodio_numero', '')
-            url_extracao = construir_url_serie(url_base, temporada, episodio)
-            print(f"\n[{idx}/{fim}] Série T{temporada}E{episodio}")
-            print(f"  URL Base: {url_base[:60]}...")
-            print(f"  URL Extração: {url_extracao[:80]}...")
-        else:
-            url_extracao = url_base
-            temporada = None
-            episodio = None
-            print(f"\n[{idx}/{fim}] Processando filme: {url_extracao[:80]}...")
-        
-        try:
-            resultado = extrair_url_video(url_extracao, f"driver_{idx}")
+    # ID do driver para modo persistente
+    driver_id = "Main-Persistent"
+    
+    try:
+        # Processa cada item no intervalo
+        for idx, item in enumerate(itens_selecionados, start=inicio):
+            url_base = item.get('url', 'URL não encontrada')
             
-            # Verifica se foi pulado (dublado=False)
-            if resultado.get('skipped'):
-                reason = resultado.get('reason', 'Motivo não especificado')
-                print(f"⊘ PULADO: {reason}")
-                print(f"  Tempo: {resultado.get('extraction_time', 'N/A')}")
-                stats['pulados'] += 1
-                
-                # Atualiza o registro mesmo se pulado (dublado=False)
-                dublado = resultado.get('dublado', False)
-                sucesso, erro = atualizar_registro_supabase(
-                    tipo_conteudo, url_base, "", dublado, temporada, episodio
-                )
-                
-                if sucesso:
-                    print(f"  ✓ Registro atualizado na tabela {TABELAS[tipo_conteudo]}")
-                else:
-                    print(f"  ✗ Erro ao atualizar: {erro}")
-                    stats['erros_atualizacao'] += 1
-            
-            # Verifica se teve sucesso
-            elif resultado.get('success'):
-                video_repro_url = resultado.get('video_repro_url', '')
-                from_cache = resultado.get('from_cache', False)
-                extraction_time = resultado.get('extraction_time', 'N/A')
-                dublado = resultado.get('dublado', None)
-                
-                if from_cache:
-                    print(f"✓ SUCESSO (Cache)")
-                    stats['sucesso_cache'] += 1
-                else:
-                    print(f"✓ SUCESSO (Extraído)")
-                    stats['sucesso_extracao'] += 1
-                
-                print(f"  Video URL: {video_repro_url[:80]}...")
-                print(f"  Dublado: {dublado}")
-                print(f"  Tempo: {extraction_time}")
-                
-                # Atualiza o registro no Supabase na tabela correta
-                sucesso, erro = atualizar_registro_supabase(
-                    tipo_conteudo, url_base, video_repro_url, dublado, temporada, episodio
-                )
-                
-                if sucesso:
-                    print(f"  ✓ Registro atualizado na tabela {TABELAS[tipo_conteudo]}")
-                else:
-                    print(f"  ✗ Erro ao atualizar: {erro}")
-                    stats['erros_atualizacao'] += 1
-            
-            # Se não teve sucesso e não foi pulado
+            # Para séries, constrói a URL completa com temporada e episódio
+            if tipo_conteudo == 'series':
+                temporada = item.get('temporada_numero', '')
+                episodio = item.get('episodio_numero', '')
+                url_extracao = construir_url_serie(url_base, temporada, episodio)
+                print(f"\n[{idx}/{fim}] Série T{temporada}E{episodio}")
+                print(f"  URL Base: {url_base[:60]}...")
+                print(f"  URL Extração: {url_extracao[:80]}...")
             else:
-                error = resultado.get('error', 'Erro não especificado')
-                dublado = resultado.get('dublado', None)
-                extraction_time = resultado.get('extraction_time', 'N/A')
+                url_extracao = url_base
+                temporada = None
+                episodio = None
+                print(f"\n[{idx}/{fim}] Processando filme: {url_extracao[:80]}...")
+            
+            try:
+                # Chama extrair_url_video com o parâmetro de driver persistente
+                resultado = extrair_url_video(
+                    url_extracao, 
+                    driver_id,
+                    tipo='serie' if tipo_conteudo == 'series' else 'filme',
+                    temporada=temporada,
+                    episodio=episodio,
+                    usar_driver_persistente=usar_driver_persistente
+                )
                 
-                print(f"✗ ERRO: {error}")
-                print(f"  Dublado: {dublado}")
-                print(f"  Tempo: {extraction_time}")
+                # Verifica se foi pulado (dublado=False)
+                if resultado.get('skipped'):
+                    reason = resultado.get('reason', 'Motivo não especificado')
+                    print(f"⊘ PULADO: {reason}")
+                    print(f"  Tempo: {resultado.get('extraction_time', 'N/A')}")
+                    stats['pulados'] += 1
+                    
+                    # Atualiza o registro mesmo se pulado (dublado=False)
+                    dublado = resultado.get('dublado', False)
+                    sucesso, erro = atualizar_registro_supabase(
+                        tipo_conteudo, url_base, "", dublado, temporada, episodio
+                    )
+                    
+                    if sucesso:
+                        print(f"  ✓ Registro atualizado na tabela {TABELAS[tipo_conteudo]}")
+                    else:
+                        print(f"  ✗ Erro ao atualizar: {erro}")
+                        stats['erros_atualizacao'] += 1
+                
+                # Verifica se teve sucesso
+                elif resultado.get('success'):
+                    video_repro_url = resultado.get('video_url', '')
+                    from_cache = resultado.get('from_cache', False)
+                    extraction_time = resultado.get('extraction_time', 'N/A')
+                    dublado = resultado.get('dublado', None)
+                    
+                    if from_cache:
+                        print(f"✓ SUCESSO (Cache)")
+                        stats['sucesso_cache'] += 1
+                    else:
+                        print(f"✓ SUCESSO (Extraído)")
+                        stats['sucesso_extracao'] += 1
+                    
+                    print(f"  Video URL: {video_repro_url[:80]}...")
+                    print(f"  Dublado: {dublado}")
+                    print(f"  Tempo: {extraction_time}")
+                    
+                    # Atualiza o registro no Supabase na tabela correta
+                    sucesso, erro = atualizar_registro_supabase(
+                        tipo_conteudo, url_base, video_repro_url, dublado, temporada, episodio
+                    )
+                    
+                    if sucesso:
+                        print(f"  ✓ Registro atualizado na tabela {TABELAS[tipo_conteudo]}")
+                    else:
+                        print(f"  ✗ Erro ao atualizar: {erro}")
+                        stats['erros_atualizacao'] += 1
+                
+                # Se não teve sucesso e não foi pulado
+                else:
+                    error = resultado.get('error', 'Erro não especificado')
+                    dublado = resultado.get('dublado', None)
+                    extraction_time = resultado.get('extraction_time', 'N/A')
+                    
+                    print(f"✗ ERRO: {error}")
+                    print(f"  Dublado: {dublado}")
+                    print(f"  Tempo: {extraction_time}")
+                    stats['erros'] += 1
+            
+            except Exception as e:
+                print(f"✗ EXCEÇÃO: {str(e)}")
                 stats['erros'] += 1
-        
-        except Exception as e:
-            print(f"✗ EXCEÇÃO: {str(e)}")
-            stats['erros'] += 1
-        
-        print("-" * 50)
-        
-        # Pequena pausa entre requisições para não sobrecarregar
-        if idx < fim:
-            time.sleep(1)
+            
+            print("-" * 50)
+            
+            # Pequena pausa entre requisições para não sobrecarregar
+            if idx < fim:
+                time.sleep(1)
+    
+    finally:
+        # IMPORTANTE: Limpar driver persistente ao final
+        if usar_driver_persistente:
+            print(f"\n🧹 Fechando navegador persistente...")
+            limpar_driver_persistente(driver_id)
     
     # Exibe estatísticas finais
     print(f"\n{'='*60}")
     print(f"RELATÓRIO FINAL - {tipo_conteudo.upper()}")
     print(f"Tabela: {TABELAS[tipo_conteudo]}")
+    print(f"Modo: {modo_texto}")
     print(f"{'='*60}")
     print(f"Total processado:      {stats['total']}")
     print(f"✓ Sucesso (Cache):     {stats['sucesso_cache']}")
@@ -346,6 +397,15 @@ def processar_urls():
     total_sucesso = stats['sucesso_cache'] + stats['sucesso_extracao']
     taxa_sucesso = (total_sucesso / stats['total'] * 100) if stats['total'] > 0 else 0
     print(f"Taxa de sucesso: {taxa_sucesso:.1f}%")
+    
+    # Calcula economia de tempo (estimativa)
+    if usar_driver_persistente and stats['sucesso_extracao'] > 0:
+        # Estima-se que cada abertura/fechamento de navegador leva ~5-8 segundos
+        tempo_economizado = (stats['sucesso_extracao'] + stats['pulados']) * 6  # média de 6 segundos
+        minutos = tempo_economizado // 60
+        segundos = tempo_economizado % 60
+        print(f"⚡ Tempo economizado (estimado): {minutos}min {segundos}s")
+    
     print(f"{'='*60}\n")
 
 if __name__ == "__main__":
@@ -356,7 +416,21 @@ if __name__ == "__main__":
             processar_urls()
         except KeyboardInterrupt:
             print("\n\n❌ Processamento interrompido pelo usuário!")
+            # Tentar limpar drivers ao interromper
+            try:
+                from extracao_url import limpar_todos_drivers
+                print("🧹 Limpando drivers persistentes...")
+                limpar_todos_drivers()
+            except:
+                pass
         except Exception as e:
             print(f"\n❌ Erro inesperado: {e}")
             import traceback
             traceback.print_exc()
+            # Tentar limpar drivers em caso de erro
+            try:
+                from extracao_url import limpar_todos_drivers
+                print("🧹 Limpando drivers persistentes...")
+                limpar_todos_drivers()
+            except:
+                pass

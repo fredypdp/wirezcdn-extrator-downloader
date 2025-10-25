@@ -38,6 +38,9 @@ SUPABASE_TABLE_SERIES = "series_url_warezcdn"
 # Cache local para evitar chamadas repetidas ao Supabase
 _cache_local = {}
 
+# Gerenciador de drivers persistentes
+_drivers_pool = {}
+
 if not SUPABASE_APIKEY:
     logger.error("SUPABASE_APIKEY não encontrada!")
 
@@ -412,12 +415,12 @@ def criar_navegador_firefox_otimizado():
             try:
                 driver.install_addon(UBLOCK_XPI, temporary=True)
                 logger.info("uBlock Origin instalado")
-                time.sleep(1)  # Reduzido de 2 para 1
+                time.sleep(1)
             except Exception as e:
                 logger.warning(f"Erro ao instalar uBlock Origin: {e}")
         
-        driver.set_page_load_timeout(20)  # Reduzido de 30 para 20
-        driver.implicitly_wait(3)  # Reduzido de 5 para 3
+        driver.set_page_load_timeout(20)
+        driver.implicitly_wait(3)
         
         logger.info("Driver Firefox criado")
         return driver
@@ -425,6 +428,48 @@ def criar_navegador_firefox_otimizado():
     except Exception as e:
         logger.error(f"Erro ao criar driver: {e}")
         raise
+
+def obter_driver_persistente(driver_id):
+    """Obtém ou cria um driver persistente para o worker"""
+    if driver_id not in _drivers_pool:
+        logger.info(f"[{driver_id}] Criando novo driver persistente")
+        _drivers_pool[driver_id] = criar_navegador_firefox_otimizado()
+    return _drivers_pool[driver_id]
+
+def limpar_driver_persistente(driver_id):
+    """Limpa e fecha um driver persistente específico"""
+    if driver_id in _drivers_pool:
+        try:
+            _drivers_pool[driver_id].quit()
+            logger.info(f"[{driver_id}] Driver persistente fechado")
+        except:
+            pass
+        del _drivers_pool[driver_id]
+
+def limpar_todos_drivers():
+    """Fecha todos os drivers persistentes"""
+    for driver_id in list(_drivers_pool.keys()):
+        limpar_driver_persistente(driver_id)
+    logger.info("Todos os drivers persistentes foram fechados")
+
+def resetar_driver(driver):
+    """Reseta o estado do driver para nova extração"""
+    try:
+        # Limpa cookies e storage
+        driver.delete_all_cookies()
+        driver.execute_script("window.localStorage.clear();")
+        driver.execute_script("window.sessionStorage.clear();")
+        
+        # Volta ao contexto principal
+        driver.switch_to.default_content()
+        
+        # Navega para página em branco
+        driver.get("about:blank")
+        
+        return True
+    except Exception as e:
+        logger.warning(f"Erro ao resetar driver: {e}")
+        return False
 
 def find_element_fast(driver, selectors, timeout=5):
     """Procura múltiplos seletores e retorna o primeiro encontrado rapidamente"""
@@ -525,9 +570,20 @@ def extrair_video_url_rapido(driver, driver_id, max_wait=20):
     
     return None
 
-def extrair_url_video(url, driver_id, tipo='filme', temporada=None, episodio=None):
+def extrair_url_video(url, driver_id, tipo='filme', temporada=None, episodio=None, usar_driver_persistente=False):
     """
     Extrai a URL do vídeo de forma OTIMIZADA
+    
+    Args:
+        url: URL da página para extração
+        driver_id: Identificador único do driver
+        tipo: 'filme' ou 'serie'
+        temporada: Número da temporada (obrigatório para séries)
+        episodio: Número do episódio (obrigatório para séries)
+        usar_driver_persistente: Se True, mantém o driver aberto para próximas extrações
+    
+    Returns:
+        Dicionário com resultado da extração
     """
     
     if tipo == 'serie' and (temporada is None or episodio is None):
@@ -549,6 +605,7 @@ def extrair_url_video(url, driver_id, tipo='filme', temporada=None, episodio=Non
             'skipped': True,
             'reason': resultado_busca.get('reason'),
             'extraction_time': '0.00s',
+            'dublado': False,
             'tipo': tipo,
             'temporada': temporada,
             'episodio': episodio
@@ -561,6 +618,7 @@ def extrair_url_video(url, driver_id, tipo='filme', temporada=None, episodio=Non
             'video_url': resultado_busca,
             'from_cache': True,
             'extraction_time': '0.00s',
+            'dublado': True,
             'tipo': tipo,
             'temporada': temporada,
             'episodio': episodio
@@ -569,15 +627,23 @@ def extrair_url_video(url, driver_id, tipo='filme', temporada=None, episodio=Non
     logger.info(f"[{driver_id}] Iniciando extração otimizada ({identificador})...")
     start_time = time.time()
     driver = None
+    driver_criado_localmente = False
     dublado = None
     
     try:
-        driver = criar_navegador_firefox_otimizado()
+        # Obter driver (persistente ou criar novo)
+        if usar_driver_persistente:
+            driver = obter_driver_persistente(driver_id)
+            resetar_driver(driver)
+        else:
+            driver = criar_navegador_firefox_otimizado()
+            driver_criado_localmente = True
+        
         logger.info(f"[{driver_id}] Navegando: {url}")
         
         driver.get(url)
         wait_for_page_ready(driver, timeout=10)
-        time.sleep(2)  # Reduzido de 3 para 2
+        time.sleep(2)
         
         # Verificar dublagem
         logger.info(f"[{driver_id}] Verificando dublagem...")
@@ -594,6 +660,7 @@ def extrair_url_video(url, driver_id, tipo='filme', temporada=None, episodio=Non
                     'skipped': True,
                     'reason': 'Conteúdo legendado',
                     'extraction_time': f"{time.time() - start_time:.2f}s",
+                    'dublado': dublado,
                     'tipo': tipo,
                     'temporada': temporada,
                     'episodio': episodio
@@ -606,7 +673,7 @@ def extrair_url_video(url, driver_id, tipo='filme', temporada=None, episodio=Non
         audio_selector = find_element_fast(driver, ['audio-selector[data-lang="2"]'], timeout=3)
         if audio_selector:
             smart_click(driver, audio_selector, driver_id)
-            time.sleep(1)  # Reduzido de 2 para 1
+            time.sleep(1)
         
         # Procurar server-selector
         logger.info(f"[{driver_id}] Procurando server-selector...")
@@ -624,11 +691,11 @@ def extrair_url_video(url, driver_id, tipo='filme', temporada=None, episodio=Non
             raise Exception("Server-selector não encontrado")
         
         smart_click(driver, server_selector, driver_id)
-        time.sleep(2)  # Reduzido
+        time.sleep(2)
         
         # Aguardar processamento mínimo
         logger.info(f"[{driver_id}] Aguardando iframes...")
-        time.sleep(5)  # Reduzido de 10 para 5
+        time.sleep(5)
         
         # Entrar nos iframes
         logger.info(f"[{driver_id}] Entrando nos iframes...")
@@ -644,7 +711,7 @@ def extrair_url_video(url, driver_id, tipo='filme', temporada=None, episodio=Non
             raise Exception("Iframe PAI não encontrado")
         
         driver.switch_to.frame(parent_iframe)
-        time.sleep(1)  # Reduzido de 2 para 1
+        time.sleep(1)
         
         child_iframe_selectors = [
             'iframe[src*="mixdrop"]',
@@ -658,7 +725,7 @@ def extrair_url_video(url, driver_id, tipo='filme', temporada=None, episodio=Non
             raise Exception("Iframe FILHO não encontrado")
         
         driver.switch_to.frame(child_iframe)
-        time.sleep(2)  # Reduzido
+        time.sleep(2)
         
         # OTIMIZAÇÃO PRINCIPAL: Tentar extração rápida primeiro
         logger.info(f"[{driver_id}] Tentando extração rápida (sem tocar vídeo)...")
@@ -688,7 +755,7 @@ def extrair_url_video(url, driver_id, tipo='filme', temporada=None, episodio=Non
             play_button = find_element_fast(driver, play_button_selectors, timeout=5)
             if play_button:
                 smart_click(driver, play_button, driver_id)
-                time.sleep(3)  # Aguardar iniciar
+                time.sleep(3)
             else:
                 # Tentar clicar no centro como fallback
                 try:
@@ -727,6 +794,7 @@ def extrair_url_video(url, driver_id, tipo='filme', temporada=None, episodio=Non
             'success': False, 
             'error': 'URL do vídeo não encontrada', 
             'dublado': dublado,
+            'extraction_time': f"{time.time() - start_time:.2f}s",
             'tipo': tipo,
             'temporada': temporada,
             'episodio': episodio
@@ -738,15 +806,18 @@ def extrair_url_video(url, driver_id, tipo='filme', temporada=None, episodio=Non
             'success': False, 
             'error': str(e), 
             'dublado': dublado,
+            'extraction_time': f"{time.time() - start_time:.2f}s",
             'tipo': tipo,
             'temporada': temporada,
             'episodio': episodio
         }
     
     finally:
-        if driver:
+        # Só fecha o driver se não for persistente
+        if driver and driver_criado_localmente:
             try:
                 driver.quit()
+                logger.info(f"[{driver_id}] Driver local fechado")
             except:
                 pass
 
@@ -759,57 +830,120 @@ download_geckodriver()
 # FUNÇÕES AUXILIARES PARA PROCESSAMENTO EM LOTE
 # ==========================================
 
-def processar_lote_urls(urls_info, max_workers=3):
+def processar_lote_urls(urls_info, max_workers=3, usar_drivers_persistentes=True):
     """
-    Processa múltiplas URLs em paralelo
+    Processa múltiplas URLs em paralelo com opção de drivers persistentes
     
     Args:
         urls_info: Lista de dicionários com 'url', 'tipo', 'temporada', 'episodio'
         max_workers: Número máximo de threads paralelas
+        usar_drivers_persistentes: Se True, mantém os drivers abertos durante todo o processo
     
     Returns:
         Lista de resultados
     """
     resultados = []
     
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {}
-        
-        for idx, info in enumerate(urls_info):
-            driver_id = f"Worker-{idx+1}"
-            future = executor.submit(
-                extrair_url_video,
+    try:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {}
+            
+            for idx, info in enumerate(urls_info):
+                driver_id = f"Worker-{idx % max_workers + 1}"
+                future = executor.submit(
+                    extrair_url_video,
+                    info['url'],
+                    driver_id,
+                    info.get('tipo', 'filme'),
+                    info.get('temporada'),
+                    info.get('episodio'),
+                    usar_drivers_persistentes
+                )
+                futures[future] = info
+            
+            for future in as_completed(futures):
+                info = futures[future]
+                try:
+                    resultado = future.result()
+                    resultado['url_original'] = info['url']
+                    resultados.append(resultado)
+                    
+                    # Log resumido
+                    if resultado.get('success'):
+                        cache = " (cache)" if resultado.get('from_cache') else ""
+                        logger.info(f"✓ {info['url'][:50]}... - {resultado['extraction_time']}{cache}")
+                    elif resultado.get('skipped'):
+                        logger.info(f"⊘ {info['url'][:50]}... - {resultado.get('reason')}")
+                    else:
+                        logger.error(f"✗ {info['url'][:50]}... - {resultado.get('error', 'Erro desconhecido')}")
+                        
+                except Exception as e:
+                    logger.error(f"✗ {info['url'][:50]}... - Exceção: {e}")
+                    resultados.append({
+                        'success': False,
+                        'error': str(e),
+                        'url_original': info['url']
+                    })
+    
+    finally:
+        # Limpar drivers persistentes ao final
+        if usar_drivers_persistentes:
+            logger.info("Limpando drivers persistentes...")
+            limpar_todos_drivers()
+    
+    return resultados
+
+def processar_urls_sequencial(urls_info, usar_driver_persistente=True):
+    """
+    Processa URLs de forma sequencial com um único driver persistente
+    Ideal para processar muitas URLs de forma eficiente sem paralelismo
+    
+    Args:
+        urls_info: Lista de dicionários com 'url', 'tipo', 'temporada', 'episodio'
+        usar_driver_persistente: Se True, reutiliza o mesmo driver para todas as URLs
+    
+    Returns:
+        Lista de resultados
+    """
+    resultados = []
+    driver_id = "Sequential-Worker"
+    
+    try:
+        for idx, info in enumerate(urls_info, 1):
+            logger.info(f"\n{'='*60}")
+            logger.info(f"Processando {idx}/{len(urls_info)}")
+            logger.info(f"{'='*60}")
+            
+            resultado = extrair_url_video(
                 info['url'],
                 driver_id,
                 info.get('tipo', 'filme'),
                 info.get('temporada'),
-                info.get('episodio')
+                info.get('episodio'),
+                usar_driver_persistente
             )
-            futures[future] = info
-        
-        for future in as_completed(futures):
-            info = futures[future]
-            try:
-                resultado = future.result()
-                resultado['url_original'] = info['url']
-                resultados.append(resultado)
-                
-                # Log resumido
-                if resultado.get('success'):
-                    cache = " (cache)" if resultado.get('from_cache') else ""
-                    logger.info(f"✓ {info['url'][:50]}... - {resultado['extraction_time']}{cache}")
-                elif resultado.get('skipped'):
-                    logger.info(f"⊘ {info['url'][:50]}... - {resultado.get('reason')}")
-                else:
-                    logger.error(f"✗ {info['url'][:50]}... - {resultado.get('error', 'Erro desconhecido')}")
-                    
-            except Exception as e:
-                logger.error(f"✗ {info['url'][:50]}... - Exceção: {e}")
-                resultados.append({
-                    'success': False,
-                    'error': str(e),
-                    'url_original': info['url']
-                })
+            
+            resultado['url_original'] = info['url']
+            resultados.append(resultado)
+            
+            # Log resumido
+            if resultado.get('success'):
+                cache = " (cache)" if resultado.get('from_cache') else ""
+                logger.info(f"✓ {info['url'][:50]}... - {resultado['extraction_time']}{cache}")
+            elif resultado.get('skipped'):
+                logger.info(f"⊘ {info['url'][:50]}... - {resultado.get('reason')}")
+            else:
+                logger.error(f"✗ {info['url'][:50]}... - {resultado.get('error', 'Erro desconhecido')}")
+            
+            # Pequena pausa entre extrações
+            if idx < len(urls_info):
+                time.sleep(1)
+    
+    finally:
+        # Limpar driver persistente ao final
+        if usar_driver_persistente:
+            logger.info("Limpando driver persistente...")
+            limpar_driver_persistente(driver_id)
     
     return resultados
 
@@ -825,15 +959,22 @@ def limpar_cache_local():
 # ==========================================
 
 if __name__ == "__main__":
-    # Exemplo 1: Extrair uma URL única
+    # Exemplo 1: Extrair uma URL única (SEM driver persistente)
+    print("\n" + "="*60)
+    print("EXEMPLO 1: Extração única sem driver persistente")
+    print("="*60)
     resultado = extrair_url_video(
         url="https://exemplo.com/filme",
         driver_id="Main",
-        tipo='filme'
+        tipo='filme',
+        usar_driver_persistente=False
     )
     print(f"Resultado: {resultado}")
     
-    # Exemplo 2: Extrair múltiplas URLs em paralelo
+    # Exemplo 2: Extrair múltiplas URLs em paralelo (COM drivers persistentes)
+    print("\n" + "="*60)
+    print("EXEMPLO 2: Processamento paralelo com drivers persistentes")
+    print("="*60)
     urls_para_processar = [
         {
             'url': 'https://exemplo.com/filme1',
@@ -853,8 +994,12 @@ if __name__ == "__main__":
         }
     ]
     
-    # Processar com 3 workers paralelos
-    resultados = processar_lote_urls(urls_para_processar, max_workers=3)
+    # Processar com 3 workers paralelos e drivers persistentes
+    resultados = processar_lote_urls(
+        urls_para_processar, 
+        max_workers=3,
+        usar_drivers_persistentes=True
+    )
     
     # Estatísticas
     sucessos = sum(1 for r in resultados if r.get('success'))
@@ -863,10 +1008,51 @@ if __name__ == "__main__":
     falhas = len(resultados) - sucessos - pulados
     
     print(f"\n{'='*60}")
-    print(f"RESUMO DO PROCESSAMENTO")
+    print(f"RESUMO DO PROCESSAMENTO PARALELO")
     print(f"{'='*60}")
     print(f"Total processado: {len(resultados)}")
     print(f"✓ Sucessos: {sucessos} (cache: {cache})")
     print(f"⊘ Pulados: {pulados}")
     print(f"✗ Falhas: {falhas}")
+    print(f"{'='*60}\n")
+    
+    # Exemplo 3: Processamento sequencial (COM driver persistente)
+    print("\n" + "="*60)
+    print("EXEMPLO 3: Processamento sequencial com driver persistente")
+    print("="*60)
+    urls_sequenciais = [
+        {
+            'url': 'https://exemplo.com/filme2',
+            'tipo': 'filme'
+        },
+        {
+            'url': 'https://exemplo.com/filme3',
+            'tipo': 'filme'
+        },
+        {
+            'url': 'https://exemplo.com/serie2',
+            'tipo': 'serie',
+            'temporada': 1,
+            'episodio': 1
+        }
+    ]
+    
+    resultados_seq = processar_urls_sequencial(
+        urls_sequenciais,
+        usar_driver_persistente=True
+    )
+    
+    # Estatísticas
+    sucessos_seq = sum(1 for r in resultados_seq if r.get('success'))
+    cache_seq = sum(1 for r in resultados_seq if r.get('from_cache'))
+    pulados_seq = sum(1 for r in resultados_seq if r.get('skipped'))
+    falhas_seq = len(resultados_seq) - sucessos_seq - pulados_seq
+    
+    print(f"\n{'='*60}")
+    print(f"RESUMO DO PROCESSAMENTO SEQUENCIAL")
+    print(f"{'='*60}")
+    print(f"Total processado: {len(resultados_seq)}")
+    print(f"✓ Sucessos: {sucessos_seq} (cache: {cache_seq})")
+    print(f"⊘ Pulados: {pulados_seq}")
+    print(f"✗ Falhas: {falhas_seq}")
     print(f"{'='*60}\n")
