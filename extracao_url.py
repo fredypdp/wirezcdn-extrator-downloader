@@ -9,17 +9,16 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.firefox.options import Options
 from selenium.webdriver.firefox.service import Service
 from selenium.webdriver.common.action_chains import ActionChains
-from selenium.common.exceptions import TimeoutException, NoSuchElementException, WebDriverException
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
 import requests
 import platform
 import zipfile
 import tarfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-
-# Desabilitar logs excessivos
 logging.getLogger('urllib3').setLevel(logging.ERROR)
 
 # Diretórios
@@ -28,7 +27,6 @@ UBLOCK_XPI = os.path.join(EXTENSIONS_DIR, 'ublock_origin.xpi')
 DRIVERS_DIR = os.path.join(os.getcwd(), 'drivers')
 GECKODRIVER_PATH = os.path.join(DRIVERS_DIR, 'geckodriver.exe' if platform.system() == 'Windows' else 'geckodriver')
 
-# Carregar as variáveis de ambiente do arquivo .env
 load_dotenv()
 
 # Configuração Supabase
@@ -37,11 +35,20 @@ SUPABASE_APIKEY = os.getenv("SUPABASE_APIKEY")
 SUPABASE_TABLE_FILMES = "filmes_url_warezcdn"
 SUPABASE_TABLE_SERIES = "series_url_warezcdn"
 
+# Cache local para evitar chamadas repetidas ao Supabase
+_cache_local = {}
+
 if not SUPABASE_APIKEY:
-    logger.error("SUPABASE_APIKEY não encontrada nas variáveis de ambiente!")
+    logger.error("SUPABASE_APIKEY não encontrada!")
 
 def buscar_dados_supabase(url_pagina, tipo='filme', temporada=None, episodio=None):
-    """Busca os dados completos do registro no Supabase pela URL da página"""
+    """Busca os dados completos do registro no Supabase com cache local"""
+    cache_key = f"{url_pagina}_{tipo}_{temporada}_{episodio}"
+    
+    if cache_key in _cache_local:
+        logger.info(f"Retornando do cache local")
+        return _cache_local[cache_key]
+    
     try:
         headers = {
             "apikey": SUPABASE_APIKEY,
@@ -49,10 +56,8 @@ def buscar_dados_supabase(url_pagina, tipo='filme', temporada=None, episodio=Non
             "Content-Type": "application/json"
         }
         
-        # Escolhe a tabela baseado no tipo
         tabela = SUPABASE_TABLE_SERIES if tipo == 'serie' else SUPABASE_TABLE_FILMES
         
-        # Monta os parâmetros de busca
         if tipo == 'serie':
             if temporada is None or episodio is None:
                 logger.error("Para séries é necessário informar temporada e episódio")
@@ -83,25 +88,22 @@ def buscar_dados_supabase(url_pagina, tipo='filme', temporada=None, episodio=Non
                 registro = data[0]
                 logger.info(f"Registro encontrado no Supabase")
                 
-                # CASO 1: dublado=False - sempre pula
+                resultado = None
                 if registro.get('dublado') is False:
                     logger.info("Registro com dublado=False - pulando extração")
-                    return {'skip': True, 'reason': 'dublado=False'}
+                    resultado = {'skip': True, 'reason': 'dublado=False'}
+                elif registro.get('dublado') is True and registro.get('video_url'):
+                    logger.info(f"video_url encontrada e dublado=True")
+                    resultado = registro.get('video_url')
+                elif registro.get('video_url'):
+                    logger.info(f"video_url encontrada")
+                    resultado = registro.get('video_url')
+                else:
+                    logger.info("Registro existe mas video_url está vazio")
+                    resultado = None
                 
-                # CASO 2: dublado=True E video_url preenchido - pula e retorna URL do cache
-                if registro.get('dublado') is True and registro.get('video_url'):
-                    logger.info(f"video_url encontrada e dublado=True: {registro.get('video_url')[:80]}...")
-                    return registro.get('video_url')
-                
-                # CASO 3: video_url existe mas dublado não é True (None ou outro valor)
-                # Retorna o video_url existente
-                if registro.get('video_url'):
-                    logger.info(f"video_url encontrada: {registro.get('video_url')[:80]}...")
-                    return registro.get('video_url')
-                
-                # CASO 4: registro existe mas video_url está vazio - permite extração
-                logger.info("Registro existe mas video_url está vazio - permitindo extração")
-                return None
+                _cache_local[cache_key] = resultado
+                return resultado
             else:
                 logger.info("URL não encontrada no Supabase")
                 return None
@@ -122,10 +124,8 @@ def verificar_existe_supabase(url_pagina, tipo='filme', temporada=None, episodio
             "Content-Type": "application/json"
         }
         
-        # Escolhe a tabela baseado no tipo
         tabela = SUPABASE_TABLE_SERIES if tipo == 'serie' else SUPABASE_TABLE_FILMES
         
-        # Monta os parâmetros de busca
         if tipo == 'serie':
             if temporada is None or episodio is None:
                 logger.error("Para séries é necessário informar temporada e episódio")
@@ -173,14 +173,10 @@ def atualizar_supabase(url_pagina, video_url, dublado=True, tipo='filme', tempor
             "Prefer": "return=minimal"
         }
         
-        # Escolhe a tabela baseado no tipo
         tabela = SUPABASE_TABLE_SERIES if tipo == 'serie' else SUPABASE_TABLE_FILMES
-        
-        # Verifica se o registro existe
         existe = verificar_existe_supabase(url_pagina, tipo, temporada, episodio)
         
         if existe:
-            # Registro existe - usa PATCH para atualizar
             logger.info("Registro existe, usando PATCH para atualizar...")
             
             if tipo == 'serie':
@@ -209,12 +205,14 @@ def atualizar_supabase(url_pagina, video_url, dublado=True, tipo='filme', tempor
             
             if response.status_code in [200, 204]:
                 logger.info(f"Registro atualizado no Supabase com sucesso")
+                # Limpar cache local
+                cache_key = f"{url_pagina}_{tipo}_{temporada}_{episodio}"
+                _cache_local.pop(cache_key, None)
                 return True
             else:
                 logger.error(f"Erro ao atualizar no Supabase: {response.status_code} - {response.text}")
                 return False
         else:
-            # Registro não existe - usa POST para criar
             logger.info("Registro não existe, usando POST para criar...")
             
             if tipo == 'serie':
@@ -245,6 +243,9 @@ def atualizar_supabase(url_pagina, video_url, dublado=True, tipo='filme', tempor
             
             if response.status_code in [200, 201, 204]:
                 logger.info(f"Novo registro criado no Supabase com sucesso")
+                # Limpar cache local
+                cache_key = f"{url_pagina}_{tipo}_{temporada}_{episodio}"
+                _cache_local.pop(cache_key, None)
                 return True
             else:
                 logger.error(f"Erro ao criar no Supabase: {response.status_code} - {response.text}")
@@ -255,7 +256,7 @@ def atualizar_supabase(url_pagina, video_url, dublado=True, tipo='filme', tempor
         return False
 
 def download_geckodriver():
-    """Baixa o geckodriver diretamente sem usar a API do GitHub"""
+    """Baixa o geckodriver"""
     if not os.path.exists(DRIVERS_DIR):
         os.makedirs(DRIVERS_DIR)
         logger.info(f"Diretório de drivers criado: {DRIVERS_DIR}")
@@ -267,25 +268,22 @@ def download_geckodriver():
     logger.info("Baixando GeckoDriver...")
     
     try:
-        # Detectar sistema operacional
         system = platform.system()
         machine = platform.machine().lower()
         
-        # URL direta para a versão 0.35.0 (última estável)
         if system == 'Windows':
             if '64' in machine or 'amd64' in machine:
                 url = "https://github.com/mozilla/geckodriver/releases/download/v0.35.0/geckodriver-v0.35.0-win64.zip"
-                driver_file = "geckodriver.exe"
             else:
                 url = "https://github.com/mozilla/geckodriver/releases/download/v0.35.0/geckodriver-v0.35.0-win32.zip"
-                driver_file = "geckodriver.exe"
+            driver_file = "geckodriver.exe"
         elif system == 'Linux':
             if 'aarch64' in machine or 'arm64' in machine:
                 url = "https://github.com/mozilla/geckodriver/releases/download/v0.35.0/geckodriver-v0.35.0-linux-aarch64.tar.gz"
             else:
                 url = "https://github.com/mozilla/geckodriver/releases/download/v0.35.0/geckodriver-v0.35.0-linux64.tar.gz"
             driver_file = "geckodriver"
-        elif system == 'Darwin':  # macOS
+        elif system == 'Darwin':
             if 'arm64' in machine:
                 url = "https://github.com/mozilla/geckodriver/releases/download/v0.35.0/geckodriver-v0.35.0-macos-aarch64.tar.gz"
             else:
@@ -298,12 +296,10 @@ def download_geckodriver():
         response = requests.get(url, timeout=60)
         response.raise_for_status()
         
-        # Salvar arquivo temporário
         temp_file = os.path.join(DRIVERS_DIR, "geckodriver_temp")
         with open(temp_file, 'wb') as f:
             f.write(response.content)
         
-        # Extrair arquivo
         if url.endswith('.zip'):
             with zipfile.ZipFile(temp_file, 'r') as zip_ref:
                 zip_ref.extractall(DRIVERS_DIR)
@@ -311,10 +307,8 @@ def download_geckodriver():
             with tarfile.open(temp_file, 'r:gz') as tar_ref:
                 tar_ref.extractall(DRIVERS_DIR)
         
-        # Remover arquivo temporário
         os.remove(temp_file)
         
-        # Dar permissão de execução no Linux/macOS
         if system != 'Windows':
             os.chmod(GECKODRIVER_PATH, 0o755)
         
@@ -353,10 +347,11 @@ def download_ublock_origin():
         logger.warning("Continuando sem uBlock Origin...")
         return False
 
-def criar_navegador_firefox_com_ublock():
-    """Cria navegador Firefox com uBlock Origin"""
+def criar_navegador_firefox_otimizado():
+    """Cria navegador Firefox otimizado para velocidade"""
     options = Options()
     
+    # Configurações básicas
     options.add_argument("--headless")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
@@ -364,28 +359,47 @@ def criar_navegador_firefox_com_ublock():
     options.add_argument("--width=1920")
     options.add_argument("--height=1080")
     
+    # User agent
     options.set_preference("general.useragent.override", 
                           "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0")
     
+    # Desabilitar detecção de webdriver
     options.set_preference("dom.webdriver.enabled", False)
     options.set_preference("useAutomationExtension", False)
     
+    # OTIMIZAÇÕES DE VELOCIDADE
+    # Desabilitar imagens (economia de banda e processamento)
+    options.set_preference("permissions.default.image", 2)
+    
+    # Desabilitar CSS (não necessário para extração)
+    options.set_preference("permissions.default.stylesheet", 2)
+    
+    # Desabilitar cache
     options.set_preference("browser.cache.disk.enable", False)
     options.set_preference("browser.cache.memory.enable", False)
     options.set_preference("network.http.use-cache", False)
     
-    options.set_preference("dom.max_script_run_time", 30)
-    options.set_preference("dom.max_chrome_script_run_time", 30)
+    # Timeouts agressivos
+    options.set_preference("dom.max_script_run_time", 15)
+    options.set_preference("dom.max_chrome_script_run_time", 15)
     
+    # Desabilitar notificações
     options.set_preference("dom.webnotifications.enabled", False)
     options.set_preference("dom.push.enabled", False)
-
-    # Mutar o áudio do navegador
+    
+    # Desabilitar áudio
     options.set_preference("media.volume_scale", "0.0")
     options.set_preference("media.default_volume", "0.0")
     
+    # Desabilitar plugins desnecessários
+    options.set_preference("plugin.state.flash", 0)
+    options.set_preference("javascript.options.showInConsole", False)
+    
+    # Desabilitar prefetch e preconnect
+    options.set_preference("network.prefetch-next", False)
+    options.set_preference("network.http.speculative-parallel-limit", 0)
+    
     try:
-        # Baixar geckodriver se necessário
         geckodriver_path = download_geckodriver()
         
         service = Service(geckodriver_path)
@@ -393,16 +407,17 @@ def criar_navegador_firefox_com_ublock():
         
         driver = webdriver.Firefox(service=service, options=options)
         
+        # Instalar uBlock se disponível (bloqueia anúncios que atrasam carregamento)
         if os.path.exists(UBLOCK_XPI):
             try:
                 driver.install_addon(UBLOCK_XPI, temporary=True)
                 logger.info("uBlock Origin instalado")
-                time.sleep(2)
+                time.sleep(1)  # Reduzido de 2 para 1
             except Exception as e:
                 logger.warning(f"Erro ao instalar uBlock Origin: {e}")
         
-        driver.set_page_load_timeout(30)
-        driver.implicitly_wait(5)
+        driver.set_page_load_timeout(20)  # Reduzido de 30 para 20
+        driver.implicitly_wait(3)  # Reduzido de 5 para 3
         
         logger.info("Driver Firefox criado")
         return driver
@@ -411,118 +426,110 @@ def criar_navegador_firefox_com_ublock():
         logger.error(f"Erro ao criar driver: {e}")
         raise
 
-def mouse_click(driver, element, driver_id):
-    """Clica em elemento emulando comportamento real do mouse"""
-    try:
-        driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", element)
+def find_element_fast(driver, selectors, timeout=5):
+    """Procura múltiplos seletores e retorna o primeiro encontrado rapidamente"""
+    end_time = time.time() + timeout
+    
+    while time.time() < end_time:
+        for selector in selectors:
+            try:
+                element = driver.find_element(By.CSS_SELECTOR, selector)
+                if element:
+                    return element
+            except:
+                continue
         time.sleep(0.5)
+    
+    return None
+
+def smart_click(driver, element, driver_id):
+    """Clica em elemento de forma otimizada"""
+    try:
+        # Scroll into view
+        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
         
-        actions = ActionChains(driver)
-        actions.move_to_element(element).pause(0.3).click().perform()
-        logger.info(f"[{driver_id}] Clique com ActionChains executado")
+        # Tentar click direto JS (mais rápido)
+        driver.execute_script("arguments[0].click();", element)
+        logger.info(f"[{driver_id}] Clique JS executado")
         return True
         
     except Exception as e:
-        logger.debug(f"[{driver_id}] ActionChains falhou: {e}, tentando JS click")
+        # Fallback para ActionChains
         try:
-            driver.execute_script("arguments[0].click();", element)
-            logger.info(f"[{driver_id}] Clique JS executado")
+            actions = ActionChains(driver)
+            actions.move_to_element(element).click().perform()
+            logger.info(f"[{driver_id}] Clique ActionChains executado")
             return True
         except Exception as e2:
-            logger.error(f"[{driver_id}] Ambos os cliques falharam: {e2}")
+            logger.error(f"[{driver_id}] Falha ao clicar: {e2}")
             return False
 
-def click_center_page(driver, driver_id):
-    """Clica exatamente no centro da página"""
+def wait_for_page_ready(driver, timeout=10):
+    """Aguarda página estar pronta de forma inteligente"""
     try:
-        width = driver.execute_script("return window.innerWidth")
-        height = driver.execute_script("return window.innerHeight")
-        center_x = width // 2
-        center_y = height // 2
-        
-        actions = ActionChains(driver)
-        actions.move_by_offset(center_x, center_y).pause(0.3).click().perform()
-        actions.move_by_offset(-center_x, -center_y).perform()
-        
-        logger.info(f"[{driver_id}] Clique no centro da página ({center_x}, {center_y})")
+        WebDriverWait(driver, timeout).until(
+            lambda d: d.execute_script("return document.readyState") == "complete"
+        )
         return True
-    except Exception as e:
-        logger.error(f"[{driver_id}] Erro ao clicar no centro: {e}")
+    except:
         return False
 
-def try_click_player(driver, driver_id):
-    """Tenta clicar no player usando 3 estratégias"""
+def extrair_video_url_rapido(driver, driver_id, max_wait=20):
+    """Tenta extrair URL do vídeo rapidamente sem precisar tocar"""
+    logger.info(f"[{driver_id}] Tentando extração rápida da URL...")
     
-    logger.info(f"[{driver_id}] Estratégia 1: Procurando button.vjs-big-play-button")
-    try:
-        play_button = WebDriverWait(driver, 5).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, 'button.vjs-big-play-button'))
-        )
-        WebDriverWait(driver, 5).until(
-            EC.element_to_be_clickable((By.CSS_SELECTOR, 'button.vjs-big-play-button'))
-        )
-        
-        if mouse_click(driver, play_button, driver_id):
-            logger.info(f"[{driver_id}] Estratégia 1 funcionou")
-            return True
-    except Exception as e:
-        logger.warning(f"[{driver_id}] Estratégia 1 falhou: {e}")
+    end_time = time.time() + max_wait
     
-    logger.info(f"[{driver_id}] Estratégia 2: Procurando span 'Play Video'")
-    try:
-        play_span = driver.find_element(By.XPATH, "//span[contains(text(), 'Play Video')]")
-        play_button_parent = play_span.find_element(By.XPATH, "./..")
-        
-        if mouse_click(driver, play_button_parent, driver_id):
-            logger.info(f"[{driver_id}] Estratégia 2 funcionou")
-            return True
-    except Exception as e:
-        logger.warning(f"[{driver_id}] Estratégia 2 falhou: {e}")
-    
-    logger.info(f"[{driver_id}] Estratégia 3: Clicando no centro")
-    try:
-        if click_center_page(driver, driver_id):
-            logger.info(f"[{driver_id}] Estratégia 3 funcionou")
-            return True
-    except Exception as e:
-        logger.warning(f"[{driver_id}] Estratégia 3 falhou: {e}")
-    
-    return False
-
-def wait_for_video_playing(driver, driver_id, max_wait=15):
-    """Aguarda o vídeo começar a reproduzir"""
-    logger.info(f"[{driver_id}] Aguardando vídeo começar a reproduzir...")
-    start_wait = time.time()
-    
-    while time.time() - start_wait < max_wait:
+    while time.time() < end_time:
         try:
-            player_element = driver.find_element(By.CSS_SELECTOR, '.player.video-js')
-            classes = player_element.get_attribute('class')
+            # Script otimizado para procurar URLs de vídeo
+            video_url = driver.execute_script("""
+                // Procurar em elementos video
+                var videos = document.querySelectorAll('video');
+                for (var i = 0; i < videos.length; i++) {
+                    if (videos[i].currentSrc && videos[i].currentSrc.length > 20) {
+                        return videos[i].currentSrc;
+                    }
+                    if (videos[i].src && videos[i].src.length > 20) {
+                        return videos[i].src;
+                    }
+                }
+                
+                // Procurar em source tags
+                var sources = document.querySelectorAll('source');
+                for (var i = 0; i < sources.length; i++) {
+                    if (sources[i].src && sources[i].src.length > 20) {
+                        return sources[i].src;
+                    }
+                }
+                
+                // Procurar no player Video.js
+                if (window.videojs) {
+                    var players = videojs.getAllPlayers();
+                    if (players.length > 0 && players[0].currentSrc()) {
+                        return players[0].currentSrc();
+                    }
+                }
+                
+                return null;
+            """)
             
-            if 'vjs-playing' in classes:
-                logger.info(f"[{driver_id}] Vídeo está reproduzindo")
-                return True
+            if video_url and len(video_url) > 20:
+                logger.info(f"[{driver_id}] URL extraída rapidamente!")
+                return video_url
+                
         except Exception as e:
-            logger.debug(f"[{driver_id}] Erro ao verificar vjs-playing: {e}")
+            logger.debug(f"[{driver_id}] Erro na extração rápida: {e}")
         
         time.sleep(1)
     
-    logger.warning(f"[{driver_id}] Timeout aguardando vjs-playing")
-    return False
+    return None
 
 def extrair_url_video(url, driver_id, tipo='filme', temporada=None, episodio=None):
     """
-    Extrai a URL do vídeo de uma página do Warezcdn
-    
-    Args:
-        url: URL da página
-        driver_id: ID do driver para logs
-        tipo: 'filme' ou 'serie'
-        temporada: Número da temporada (obrigatório para séries)
-        episodio: Número do episódio (obrigatório para séries)
+    Extrai a URL do vídeo de forma OTIMIZADA
     """
     
-    # Validação para séries
     if tipo == 'serie' and (temporada is None or episodio is None):
         logger.error(f"[{driver_id}] Para séries é necessário informar temporada e episódio")
         return {
@@ -531,11 +538,10 @@ def extrair_url_video(url, driver_id, tipo='filme', temporada=None, episodio=Non
         }
     
     identificador = f"T{temporada}E{episodio}" if tipo == 'serie' else "Filme"
-    logger.info(f"[{driver_id}] Verificando se video_url já existe no Supabase ({identificador})...")
+    logger.info(f"[{driver_id}] Verificando cache Supabase ({identificador})...")
     
     resultado_busca = buscar_dados_supabase(url, tipo, temporada, episodio)
     
-    # Se é um dict com 'skip', não extrai
     if isinstance(resultado_busca, dict) and resultado_busca.get('skip'):
         logger.info(f"[{driver_id}] Extração pulada: {resultado_busca.get('reason')}")
         return {
@@ -548,9 +554,8 @@ def extrair_url_video(url, driver_id, tipo='filme', temporada=None, episodio=Non
             'episodio': episodio
         }
     
-    # Se encontrou video_url válida
     if resultado_busca and isinstance(resultado_busca, str):
-        logger.info(f"[{driver_id}] video_url encontrada no Supabase (cache) - {identificador}")
+        logger.info(f"[{driver_id}] video_url do cache - {identificador}")
         return {
             'success': True, 
             'video_url': resultado_busca,
@@ -561,98 +566,72 @@ def extrair_url_video(url, driver_id, tipo='filme', temporada=None, episodio=Non
             'episodio': episodio
         }
     
-    logger.info(f"[{driver_id}] video_url não encontrada, iniciando extração ({identificador})...")
+    logger.info(f"[{driver_id}] Iniciando extração otimizada ({identificador})...")
     start_time = time.time()
     driver = None
-    dublado = None  # Padrão é nulo
+    dublado = None
     
     try:
-        driver = criar_navegador_firefox_com_ublock()
-        logger.info(f"[{driver_id}] Iniciando extração: {url} ({identificador})")
+        driver = criar_navegador_firefox_otimizado()
+        logger.info(f"[{driver_id}] Navegando: {url}")
         
-        logger.info(f"[{driver_id}] 1. Navegando para a página...")
         driver.get(url)
-        time.sleep(3)
+        wait_for_page_ready(driver, timeout=10)
+        time.sleep(2)  # Reduzido de 3 para 2
         
-        logger.info(f"[{driver_id}] 2. Verificando se conteúdo é dublado...")
+        # Verificar dublagem
+        logger.info(f"[{driver_id}] Verificando dublagem...")
         try:
-            playeroptions_audios = WebDriverWait(driver, 5).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, 'playeroptions-audios'))
-            )
+            playeroptions_audios = driver.find_element(By.CSS_SELECTOR, 'playeroptions-audios')
             classes = playeroptions_audios.get_attribute('class') or ''
             
             if 'hidden' in classes:
-                logger.warning(f"[{driver_id}] playeroptions-audios tem classe 'hidden' - conteúdo legendado (não dublado)")
+                logger.warning(f"[{driver_id}] Conteúdo legendado - pulando")
                 dublado = False
                 atualizar_supabase(url, None, dublado, tipo, temporada, episodio)
                 return {
                     'success': False,
                     'skipped': True,
-                    'reason': 'Conteúdo legendado (playeroptions-audios hidden)',
+                    'reason': 'Conteúdo legendado',
                     'extraction_time': f"{time.time() - start_time:.2f}s",
                     'tipo': tipo,
                     'temporada': temporada,
                     'episodio': episodio
                 }
-            else:
-                logger.info(f"[{driver_id}] playeroptions-audios visível - conteúdo pode ser dublado")
-        except Exception as e:
-            logger.warning(f"[{driver_id}] Não foi possível verificar playeroptions-audios: {e}")
+        except:
+            pass
         
-        logger.info(f"[{driver_id}] 3. Procurando audio-selector...")
-        try:
-            audio_selectors = ['audio-selector[data-lang="2"]']
-            audio_selector = None
-            for selector in audio_selectors:
-                try:
-                    audio_selector = WebDriverWait(driver, 5).until(
-                        EC.presence_of_element_located((By.CSS_SELECTOR, selector))
-                    )
-                    logger.info(f"[{driver_id}] Audio-selector encontrado")
-                    break
-                except:
-                    continue
-            
-            if audio_selector:
-                if mouse_click(driver, audio_selector, driver_id):
-                    logger.info(f"[{driver_id}] Audio-selector clicado")
-                    time.sleep(2)
-        except Exception as e:
-            logger.warning(f"[{driver_id}] Erro com audio-selector: {e}")
+        # Clicar em audio-selector se existir
+        logger.info(f"[{driver_id}] Procurando audio-selector...")
+        audio_selector = find_element_fast(driver, ['audio-selector[data-lang="2"]'], timeout=3)
+        if audio_selector:
+            smart_click(driver, audio_selector, driver_id)
+            time.sleep(1)  # Reduzido de 2 para 1
         
-        logger.info(f"[{driver_id}] 4. Procurando server-selector...")
+        # Procurar server-selector
+        logger.info(f"[{driver_id}] Procurando server-selector...")
         server_selectors = [
             'server-selector[data-server="mixdrop"][data-lang="2"]',
             'server-selector[data-lang="2"]'
         ]
         
-        server_selector = None
-        for selector in server_selectors:
-            try:
-                server_selector = WebDriverWait(driver, 5).until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, selector))
-                )
-                logger.info(f"[{driver_id}] Server-selector encontrado")
-                break
-            except:
-                continue
+        server_selector = find_element_fast(driver, server_selectors, timeout=5)
         
         if not server_selector:
-            logger.warning(f"[{driver_id}] Server-selector não encontrado - conteúdo não dublado")
-            # Marca como False no Supabase para não tentar extrair novamente
+            logger.warning(f"[{driver_id}] Server-selector não encontrado")
             dublado = False
             atualizar_supabase(url, None, dublado, tipo, temporada, episodio)
-            raise Exception("Server-selector não encontrado - não dublado")
+            raise Exception("Server-selector não encontrado")
         
-        if not mouse_click(driver, server_selector, driver_id):
-            raise Exception("Falha ao clicar no server-selector")
+        smart_click(driver, server_selector, driver_id)
+        time.sleep(2)  # Reduzido
         
-        time.sleep(2)
+        # Aguardar processamento mínimo
+        logger.info(f"[{driver_id}] Aguardando iframes...")
+        time.sleep(5)  # Reduzido de 10 para 5
         
-        logger.info(f"[{driver_id}] 5. Aguardando 10 segundos...")
-        time.sleep(10)
-        
-        logger.info(f"[{driver_id}] 6. Entrando nos iframes...")
+        # Entrar nos iframes
+        logger.info(f"[{driver_id}] Entrando nos iframes...")
         
         parent_iframe_selectors = [
             'embedcontent.active iframe',
@@ -660,21 +639,12 @@ def extrair_url_video(url, driver_id, tipo='filme', temporada=None, episodio=Non
             'iframe[src*="getEmbed"]'
         ]
         
-        parent_iframe = None
-        for selector in parent_iframe_selectors:
-            try:
-                parent_iframe = WebDriverWait(driver, 5).until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, selector))
-                )
-                break
-            except:
-                continue
-        
+        parent_iframe = find_element_fast(driver, parent_iframe_selectors, timeout=5)
         if not parent_iframe:
             raise Exception("Iframe PAI não encontrado")
         
         driver.switch_to.frame(parent_iframe)
-        time.sleep(2)
+        time.sleep(1)  # Reduzido de 2 para 1
         
         child_iframe_selectors = [
             'iframe[src*="mixdrop"]',
@@ -682,90 +652,76 @@ def extrair_url_video(url, driver_id, tipo='filme', temporada=None, episodio=Non
             'iframe'
         ]
         
-        child_iframe = None
-        for selector in child_iframe_selectors:
-            try:
-                child_iframe = WebDriverWait(driver, 5).until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, selector))
-                )
-                break
-            except:
-                continue
+        child_iframe = find_element_fast(driver, child_iframe_selectors, timeout=5)
         
         if not child_iframe:
             raise Exception("Iframe FILHO não encontrado")
         
         driver.switch_to.frame(child_iframe)
-        time.sleep(2)
+        time.sleep(2)  # Reduzido
         
-        logger.info(f"[{driver_id}] 7. Aguardando player processar...")
-        time.sleep(10)
+        # OTIMIZAÇÃO PRINCIPAL: Tentar extração rápida primeiro
+        logger.info(f"[{driver_id}] Tentando extração rápida (sem tocar vídeo)...")
+        video_url = extrair_video_url_rapido(driver, driver_id, max_wait=10)
         
-        logger.info(f"[{driver_id}] 8. Removendo overlays...")
-        try:
-            removed = driver.execute_script("""
-                var overlays = document.querySelectorAll('div[style*="position: absolute"][style*="z-index: 2147483646"]');
-                var count = overlays.length;
-                overlays.forEach(o => o.remove());
-                return count;
-            """)
-            logger.info(f"[{driver_id}] {removed} overlay(s) removido(s)")
-        except Exception as e:
-            logger.warning(f"[{driver_id}] Erro ao remover overlays: {e}")
-        
-        logger.info(f"[{driver_id}] 9. Tentando clicar no player...")
-        for attempt in range(3):
-            if try_click_player(driver, driver_id):
-                if wait_for_video_playing(driver, driver_id):
-                    time.sleep(10)
-                    break
-            time.sleep(2)
-        
-        logger.info(f"[{driver_id}] 10. Procurando URL do vídeo...")
-        
-        max_wait = 30
-        start_search = time.time()
-        
-        while time.time() - start_search < max_wait:
+        # Se não conseguiu pela extração rápida, tentar o método tradicional
+        if not video_url:
+            logger.info(f"[{driver_id}] Extração rápida falhou, tentando método tradicional...")
+            
+            # Remover overlays
             try:
-                video_url = driver.execute_script("""
-                    var video = document.getElementById('videojs_html5_api');
-                    if (video && (video.currentSrc || video.src)) {
-                        return video.currentSrc || video.src;
-                    }
-                    var videos = document.querySelectorAll('video');
-                    for (var i = 0; i < videos.length; i++) {
-                        if (videos[i].currentSrc || videos[i].src) {
-                            return videos[i].currentSrc || videos[i].src;
-                        }
-                    }
-                    return null;
+                driver.execute_script("""
+                    var overlays = document.querySelectorAll('div[style*="position: absolute"][style*="z-index"]');
+                    overlays.forEach(o => o.remove());
                 """)
-                
-                if video_url and len(video_url) > 10:
-                    elapsed = time.time() - start_time
-                    logger.info(f"[{driver_id}] URL encontrada! ({identificador})")
-                    
-                    # Marca como dublado apenas quando extrai a URL com sucesso
-                    dublado = True
-                    
-                    # Salva no Supabase
-                    atualizar_supabase(url, video_url, dublado, tipo, temporada, episodio)
-                    
-                    return {
-                        'success': True, 
-                        'video_url': video_url, 
-                        'from_cache': False,
-                        'extraction_time': f"{elapsed:.2f}s",
-                        'dublado': dublado,
-                        'tipo': tipo,
-                        'temporada': temporada,
-                        'episodio': episodio
-                    }
-                
-                time.sleep(2)
-            except Exception as e:
-                time.sleep(2)
+            except:
+                pass
+            
+            # Tentar clicar no player
+            logger.info(f"[{driver_id}] Procurando botão play...")
+            play_button_selectors = [
+                'button.vjs-big-play-button',
+                '.vjs-play-control',
+                'button[aria-label*="Play"]'
+            ]
+            
+            play_button = find_element_fast(driver, play_button_selectors, timeout=5)
+            if play_button:
+                smart_click(driver, play_button, driver_id)
+                time.sleep(3)  # Aguardar iniciar
+            else:
+                # Tentar clicar no centro como fallback
+                try:
+                    width = driver.execute_script("return window.innerWidth")
+                    height = driver.execute_script("return window.innerHeight")
+                    actions = ActionChains(driver)
+                    actions.move_by_offset(width // 2, height // 2).click().perform()
+                    actions.move_by_offset(-width // 2, -height // 2).perform()
+                    time.sleep(3)
+                except:
+                    pass
+            
+            # Procurar URL após tentar tocar
+            logger.info(f"[{driver_id}] Procurando URL do vídeo...")
+            video_url = extrair_video_url_rapido(driver, driver_id, max_wait=15)
+        
+        if video_url and len(video_url) > 20:
+            elapsed = time.time() - start_time
+            logger.info(f"[{driver_id}] ✓ URL encontrada em {elapsed:.2f}s ({identificador})")
+            
+            dublado = True
+            atualizar_supabase(url, video_url, dublado, tipo, temporada, episodio)
+            
+            return {
+                'success': True, 
+                'video_url': video_url, 
+                'from_cache': False,
+                'extraction_time': f"{elapsed:.2f}s",
+                'dublado': dublado,
+                'tipo': tipo,
+                'temporada': temporada,
+                'episodio': episodio
+            }
         
         return {
             'success': False, 
@@ -797,3 +753,120 @@ def extrair_url_video(url, driver_id, tipo='filme', temporada=None, episodio=Non
 # Inicialização
 download_ublock_origin()
 download_geckodriver()
+
+
+# ==========================================
+# FUNÇÕES AUXILIARES PARA PROCESSAMENTO EM LOTE
+# ==========================================
+
+def processar_lote_urls(urls_info, max_workers=3):
+    """
+    Processa múltiplas URLs em paralelo
+    
+    Args:
+        urls_info: Lista de dicionários com 'url', 'tipo', 'temporada', 'episodio'
+        max_workers: Número máximo de threads paralelas
+    
+    Returns:
+        Lista de resultados
+    """
+    resultados = []
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {}
+        
+        for idx, info in enumerate(urls_info):
+            driver_id = f"Worker-{idx+1}"
+            future = executor.submit(
+                extrair_url_video,
+                info['url'],
+                driver_id,
+                info.get('tipo', 'filme'),
+                info.get('temporada'),
+                info.get('episodio')
+            )
+            futures[future] = info
+        
+        for future in as_completed(futures):
+            info = futures[future]
+            try:
+                resultado = future.result()
+                resultado['url_original'] = info['url']
+                resultados.append(resultado)
+                
+                # Log resumido
+                if resultado.get('success'):
+                    cache = " (cache)" if resultado.get('from_cache') else ""
+                    logger.info(f"✓ {info['url'][:50]}... - {resultado['extraction_time']}{cache}")
+                elif resultado.get('skipped'):
+                    logger.info(f"⊘ {info['url'][:50]}... - {resultado.get('reason')}")
+                else:
+                    logger.error(f"✗ {info['url'][:50]}... - {resultado.get('error', 'Erro desconhecido')}")
+                    
+            except Exception as e:
+                logger.error(f"✗ {info['url'][:50]}... - Exceção: {e}")
+                resultados.append({
+                    'success': False,
+                    'error': str(e),
+                    'url_original': info['url']
+                })
+    
+    return resultados
+
+def limpar_cache_local():
+    """Limpa o cache local em memória"""
+    global _cache_local
+    _cache_local.clear()
+    logger.info("Cache local limpo")
+
+
+# ==========================================
+# EXEMPLO DE USO
+# ==========================================
+
+if __name__ == "__main__":
+    # Exemplo 1: Extrair uma URL única
+    resultado = extrair_url_video(
+        url="https://exemplo.com/filme",
+        driver_id="Main",
+        tipo='filme'
+    )
+    print(f"Resultado: {resultado}")
+    
+    # Exemplo 2: Extrair múltiplas URLs em paralelo
+    urls_para_processar = [
+        {
+            'url': 'https://exemplo.com/filme1',
+            'tipo': 'filme'
+        },
+        {
+            'url': 'https://exemplo.com/serie1',
+            'tipo': 'serie',
+            'temporada': 1,
+            'episodio': 1
+        },
+        {
+            'url': 'https://exemplo.com/serie1',
+            'tipo': 'serie',
+            'temporada': 1,
+            'episodio': 2
+        }
+    ]
+    
+    # Processar com 3 workers paralelos
+    resultados = processar_lote_urls(urls_para_processar, max_workers=3)
+    
+    # Estatísticas
+    sucessos = sum(1 for r in resultados if r.get('success'))
+    cache = sum(1 for r in resultados if r.get('from_cache'))
+    pulados = sum(1 for r in resultados if r.get('skipped'))
+    falhas = len(resultados) - sucessos - pulados
+    
+    print(f"\n{'='*60}")
+    print(f"RESUMO DO PROCESSAMENTO")
+    print(f"{'='*60}")
+    print(f"Total processado: {len(resultados)}")
+    print(f"✓ Sucessos: {sucessos} (cache: {cache})")
+    print(f"⊘ Pulados: {pulados}")
+    print(f"✗ Falhas: {falhas}")
+    print(f"{'='*60}\n")
