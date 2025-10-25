@@ -49,7 +49,7 @@ def buscar_dados_supabase(url_pagina):
         }
         
         params = {
-            "select": "url,video_repro_url,dublado",
+            "select": "url,video_url,dublado",
             "url": f"eq.{url_pagina}"
         }
         
@@ -71,19 +71,19 @@ def buscar_dados_supabase(url_pagina):
                     logger.info("Registro com dublado=False - pulando extração")
                     return {'skip': True, 'reason': 'dublado=False'}
                 
-                # CASO 2: dublado=True E video_repro_url preenchido - pula e retorna URL do cache
-                if registro.get('dublado') is True and registro.get('video_repro_url'):
-                    logger.info(f"video_repro_url encontrada e dublado=True: {registro.get('video_repro_url')[:80]}...")
-                    return registro.get('video_repro_url')
+                # CASO 2: dublado=True E video_url preenchido - pula e retorna URL do cache
+                if registro.get('dublado') is True and registro.get('video_url'):
+                    logger.info(f"video_url encontrada e dublado=True: {registro.get('video_url')[:80]}...")
+                    return registro.get('video_url')
                 
-                # CASO 3: video_repro_url existe mas dublado não é True (None ou outro valor)
-                # Retorna o video_repro_url existente
-                if registro.get('video_repro_url'):
-                    logger.info(f"video_repro_url encontrada: {registro.get('video_repro_url')[:80]}...")
-                    return registro.get('video_repro_url')
+                # CASO 3: video_url existe mas dublado não é True (None ou outro valor)
+                # Retorna o video_url existente
+                if registro.get('video_url'):
+                    logger.info(f"video_url encontrada: {registro.get('video_url')[:80]}...")
+                    return registro.get('video_url')
                 
-                # CASO 4: registro existe mas video_repro_url está vazio - permite extração
-                logger.info("Registro existe mas video_repro_url está vazio - permitindo extração")
+                # CASO 4: registro existe mas video_url está vazio - permite extração
+                logger.info("Registro existe mas video_url está vazio - permitindo extração")
                 return None
             else:
                 logger.info("URL não encontrada no Supabase")
@@ -91,10 +91,6 @@ def buscar_dados_supabase(url_pagina):
         else:
             logger.error(f"Erro ao buscar no Supabase: {response.status_code}")
             return None
-            
-    except Exception as e:
-        logger.error(f"Erro ao buscar dados no Supabase: {e}")
-        return None
             
     except Exception as e:
         logger.error(f"Erro ao buscar dados no Supabase: {e}")
@@ -134,7 +130,7 @@ def verificar_existe_supabase(url_pagina):
         logger.error(f"Erro ao verificar existência no Supabase: {e}")
         return False
 
-def atualizar_supabase(url_pagina, video_repro_url, dublado=True):
+def atualizar_supabase(url_pagina, video_url, dublado=True):
     """Atualiza ou cria registro no Supabase"""
     try:
         headers = {
@@ -155,7 +151,7 @@ def atualizar_supabase(url_pagina, video_repro_url, dublado=True):
             }
             
             data = {
-                "video_repro_url": video_repro_url,
+                "video_url": video_url,
                 "dublado": dublado
             }
             
@@ -178,7 +174,7 @@ def atualizar_supabase(url_pagina, video_repro_url, dublado=True):
             logger.info("Registro não existe, usando POST para criar...")
             data = {
                 "url": url_pagina,
-                "video_repro_url": video_repro_url,
+                "video_url": video_url,
                 "dublado": dublado
             }
             
@@ -459,7 +455,7 @@ def wait_for_video_playing(driver, driver_id, max_wait=15):
 def extrair_url_video(url, driver_id):
     """Extrai a URL do vídeo de uma página do Warezcdn"""
     
-    logger.info(f"[{driver_id}] Verificando se video_repro_url já existe no Supabase...")
+    logger.info(f"[{driver_id}] Verificando se video_url já existe no Supabase...")
     resultado_busca = buscar_dados_supabase(url)
     
     # Se é um dict com 'skip', não extrai
@@ -472,17 +468,17 @@ def extrair_url_video(url, driver_id):
             'extraction_time': '0.00s'
         }
     
-    # Se encontrou video_repro_url válida
+    # Se encontrou video_url válida
     if resultado_busca and isinstance(resultado_busca, str):
-        logger.info(f"[{driver_id}] video_repro_url encontrada no Supabase (cache)")
+        logger.info(f"[{driver_id}] video_url encontrada no Supabase (cache)")
         return {
             'success': True, 
-            'video_repro_url': resultado_busca,
+            'video_url': resultado_busca,
             'from_cache': True,
             'extraction_time': '0.00s'
         }
     
-    logger.info(f"[{driver_id}] video_repro_url não encontrada, iniciando extração...")
+    logger.info(f"[{driver_id}] video_url não encontrada, iniciando extração...")
     start_time = time.time()
     driver = None
     dublado = None  # Padrão é nulo
@@ -495,7 +491,29 @@ def extrair_url_video(url, driver_id):
         driver.get(url)
         time.sleep(3)
         
-        logger.info(f"[{driver_id}] 2. Procurando audio-selector...")
+        logger.info(f"[{driver_id}] 2. Verificando se conteúdo é dublado...")
+        try:
+            playeroptions_audios = WebDriverWait(driver, 5).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, 'playeroptions-audios'))
+            )
+            classes = playeroptions_audios.get_attribute('class') or ''
+            
+            if 'hidden' in classes:
+                logger.warning(f"[{driver_id}] playeroptions-audios tem classe 'hidden' - conteúdo legendado (não dublado)")
+                dublado = False
+                atualizar_supabase(url, None, dublado)
+                return {
+                    'success': False,
+                    'skipped': True,
+                    'reason': 'Conteúdo legendado (playeroptions-audios hidden)',
+                    'extraction_time': f"{time.time() - start_time:.2f}s"
+                }
+            else:
+                logger.info(f"[{driver_id}] playeroptions-audios visível - conteúdo pode ser dublado")
+        except Exception as e:
+            logger.warning(f"[{driver_id}] Não foi possível verificar playeroptions-audios: {e}")
+        
+        logger.info(f"[{driver_id}] 3. Procurando audio-selector...")
         try:
             audio_selectors = ['audio-selector[data-lang="2"]']
             audio_selector = None
@@ -516,7 +534,7 @@ def extrair_url_video(url, driver_id):
         except Exception as e:
             logger.warning(f"[{driver_id}] Erro com audio-selector: {e}")
         
-        logger.info(f"[{driver_id}] 3. Procurando server-selector...")
+        logger.info(f"[{driver_id}] 4. Procurando server-selector...")
         server_selectors = [
             'server-selector[data-server="mixdrop"][data-lang="2"]',
             'server-selector[data-lang="2"]'
@@ -545,10 +563,10 @@ def extrair_url_video(url, driver_id):
         
         time.sleep(2)
         
-        logger.info(f"[{driver_id}] 4. Aguardando 10 segundos...")
+        logger.info(f"[{driver_id}] 5. Aguardando 10 segundos...")
         time.sleep(10)
         
-        logger.info(f"[{driver_id}] 5. Entrando nos iframes...")
+        logger.info(f"[{driver_id}] 6. Entrando nos iframes...")
         
         parent_iframe_selectors = [
             'embedcontent.active iframe',
@@ -594,10 +612,10 @@ def extrair_url_video(url, driver_id):
         driver.switch_to.frame(child_iframe)
         time.sleep(2)
         
-        logger.info(f"[{driver_id}] 6. Aguardando player processar...")
+        logger.info(f"[{driver_id}] 7. Aguardando player processar...")
         time.sleep(10)
         
-        logger.info(f"[{driver_id}] 7. Removendo overlays...")
+        logger.info(f"[{driver_id}] 8. Removendo overlays...")
         try:
             removed = driver.execute_script("""
                 var overlays = document.querySelectorAll('div[style*="position: absolute"][style*="z-index: 2147483646"]');
@@ -609,7 +627,7 @@ def extrair_url_video(url, driver_id):
         except Exception as e:
             logger.warning(f"[{driver_id}] Erro ao remover overlays: {e}")
         
-        logger.info(f"[{driver_id}] 8. Tentando clicar no player...")
+        logger.info(f"[{driver_id}] 9. Tentando clicar no player...")
         for attempt in range(3):
             if try_click_player(driver, driver_id):
                 if wait_for_video_playing(driver, driver_id):
@@ -617,14 +635,14 @@ def extrair_url_video(url, driver_id):
                     break
             time.sleep(2)
         
-        logger.info(f"[{driver_id}] 9. Procurando URL do vídeo...")
+        logger.info(f"[{driver_id}] 10. Procurando URL do vídeo...")
         
         max_wait = 30
         start_search = time.time()
         
         while time.time() - start_search < max_wait:
             try:
-                video_repro_url = driver.execute_script("""
+                video_url = driver.execute_script("""
                     var video = document.getElementById('videojs_html5_api');
                     if (video && (video.currentSrc || video.src)) {
                         return video.currentSrc || video.src;
@@ -638,7 +656,7 @@ def extrair_url_video(url, driver_id):
                     return null;
                 """)
                 
-                if video_repro_url and len(video_repro_url) > 10:
+                if video_url and len(video_url) > 10:
                     elapsed = time.time() - start_time
                     logger.info(f"[{driver_id}] URL encontrada!")
                     
@@ -646,11 +664,11 @@ def extrair_url_video(url, driver_id):
                     dublado = True
                     
                     # Salva no Supabase
-                    atualizar_supabase(url, video_repro_url, dublado)
+                    atualizar_supabase(url, video_url, dublado)
                     
                     return {
                         'success': True, 
-                        'video_repro_url': video_repro_url, 
+                        'video_url': video_url, 
                         'from_cache': False,
                         'extraction_time': f"{elapsed:.2f}s",
                         'dublado': dublado
