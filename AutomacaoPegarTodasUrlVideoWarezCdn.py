@@ -10,10 +10,37 @@ load_dotenv()
 # Configuração Supabase
 SUPABASE_URL = "https://forfhjlkrqjpglfbiosd.supabase.co"
 SUPABASE_APIKEY = os.getenv("SUPABASE_APIKEY")
-SUPABASE_TABLE = "filmes_url_warezcdn"
 
-def buscar_todos_registros_supabase():
+# Configuração de tabelas
+TABELAS = {
+    'filmes': 'filmes_url_warezcdn',
+    'series': 'series_url_warezcdn'
+}
+
+def escolher_tipo_conteudo():
+    """Permite o usuário escolher entre filmes e séries."""
+    print(f"\n{'='*50}")
+    print("TIPO DE CONTEÚDO")
+    print(f"{'='*50}")
+    print("1 - Filmes")
+    print("2 - Séries")
+    print(f"{'='*50}\n")
+    
+    while True:
+        try:
+            escolha = input("Escolha o tipo de conteúdo (1 ou 2): ").strip()
+            if escolha == '1':
+                return 'filmes'
+            elif escolha == '2':
+                return 'series'
+            else:
+                print("❌ Escolha inválida! Digite 1 para Filmes ou 2 para Séries.")
+        except Exception as e:
+            print(f"❌ Erro: {e}")
+
+def buscar_todos_registros_supabase(tipo_conteudo):
     """Busca todos os registros do Supabase onde dublado é nulo com paginação de 1000 em 1000."""
+    tabela = TABELAS[tipo_conteudo]
     todos_registros = []
     offset = 0
     limite = 1000
@@ -24,19 +51,29 @@ def buscar_todos_registros_supabase():
         "Content-Type": "application/json"
     }
     
-    print("📄 Buscando registros do Supabase (dublado=null)...")
+    print(f"\n📄 Buscando registros de {tipo_conteudo} do Supabase (dublado=null)...")
     
     while True:
         try:
+            # Define os campos de seleção baseado no tipo
+            if tipo_conteudo == 'filmes':
+                select_fields = "url,video_repro_url,dublado"
+            else:  # series
+                select_fields = "url,video_repro_url,dublado,temporada_numero,episodio_numero"
+            
             params = {
-                "select": "url,video_repro_url,dublado",
+                "select": select_fields,
                 "dublado": "is.null",
                 "offset": offset,
                 "limit": limite
             }
             
+            # Para séries, ordena por url, temporada e episódio para facilitar identificação
+            if tipo_conteudo == 'series':
+                params["order"] = "url.asc,temporada_numero.asc,episodio_numero.asc"
+            
             response = requests.get(
-                f"{SUPABASE_URL}/rest/v1/{SUPABASE_TABLE}",
+                f"{SUPABASE_URL}/rest/v1/{tabela}",
                 headers=headers,
                 params=params,
                 timeout=30
@@ -65,8 +102,69 @@ def buscar_todos_registros_supabase():
             print(f"❌ Erro ao buscar registros: {e}")
             break
     
-    print(f"✓ Total de registros carregados: {len(todos_registros)}\n")
+    # Remove duplicatas para séries (mesma url + temporada + episódio)
+    if tipo_conteudo == 'series':
+        registros_unicos = []
+        vistos = set()
+        
+        for reg in todos_registros:
+            chave = (reg['url'], reg.get('temporada_numero'), reg.get('episodio_numero'))
+            if chave not in vistos:
+                vistos.add(chave)
+                registros_unicos.append(reg)
+        
+        duplicatas = len(todos_registros) - len(registros_unicos)
+        if duplicatas > 0:
+            print(f"⚠️  Removidas {duplicatas} duplicatas (mesma URL + temporada + episódio)")
+        
+        todos_registros = registros_unicos
+    
+    print(f"✓ Total de registros únicos carregados: {len(todos_registros)}\n")
     return todos_registros
+
+def atualizar_registro_supabase(tipo_conteudo, url_base, video_repro_url, dublado, temporada=None, episodio=None):
+    """Atualiza um registro no Supabase na tabela correta."""
+    tabela = TABELAS[tipo_conteudo]
+    
+    headers = {
+        "apikey": SUPABASE_APIKEY,
+        "Authorization": f"Bearer {SUPABASE_APIKEY}",
+        "Content-Type": "application/json",
+        "Prefer": "return=minimal"
+    }
+    
+    # Monta os dados de atualização
+    dados_atualizacao = {
+        "video_repro_url": video_repro_url,
+        "dublado": dublado
+    }
+    
+    # Monta os parâmetros de filtro baseado no tipo
+    if tipo_conteudo == 'filmes':
+        params = {"url": f"eq.{url_base}"}
+    else:  # series
+        params = {
+            "url": f"eq.{url_base}",
+            "temporada_numero": f"eq.{temporada}",
+            "episodio_numero": f"eq.{episodio}"
+        }
+    
+    try:
+        response = requests.patch(
+            f"{SUPABASE_URL}/rest/v1/{tabela}",
+            headers=headers,
+            params=params,
+            json=dados_atualizacao,
+            timeout=30
+        )
+        
+        if response.status_code in [200, 204]:
+            return True, None
+        else:
+            return False, f"Status {response.status_code}: {response.text}"
+    
+    except Exception as e:
+        return False, str(e)
 
 def obter_intervalo(total_itens):
     """Solicita ao usuário o intervalo de processamento."""
@@ -96,13 +194,22 @@ def obter_intervalo(total_itens):
     
     return inicio, fim
 
+def construir_url_serie(url_base, temporada, episodio):
+    """Constrói a URL completa para um episódio de série."""
+    # Remove barra final se existir
+    url_base = url_base.rstrip('/')
+    return f"{url_base}/{temporada}/{episodio}"
+
 def processar_urls():
     """Processa as URLs no intervalo especificado."""
+    # Escolhe o tipo de conteúdo
+    tipo_conteudo = escolher_tipo_conteudo()
+    
     # Busca todos os registros do Supabase
-    data = buscar_todos_registros_supabase()
+    data = buscar_todos_registros_supabase(tipo_conteudo)
     
     if not data:
-        print("❌ Nenhum registro encontrado no Supabase!")
+        print(f"❌ Nenhum registro de {tipo_conteudo} encontrado no Supabase!")
         return
     
     total_itens = len(data)
@@ -118,7 +225,8 @@ def processar_urls():
     itens_selecionados = data[indice_inicio:indice_fim]
     
     print(f"\n{'='*50}")
-    print(f"Processando itens de {inicio} até {fim} ({len(itens_selecionados)} itens)")
+    print(f"Processando {tipo_conteudo} de {inicio} até {fim} ({len(itens_selecionados)} itens)")
+    print(f"Tabela: {TABELAS[tipo_conteudo]}")
     print(f"{'='*50}\n")
     
     # Estatísticas
@@ -127,17 +235,30 @@ def processar_urls():
         'sucesso_extracao': 0,
         'pulados': 0,
         'erros': 0,
+        'erros_atualizacao': 0,
         'total': len(itens_selecionados)
     }
     
     # Processa cada item no intervalo
     for idx, item in enumerate(itens_selecionados, start=inicio):
-        url = item.get('url', 'URL não encontrada')
+        url_base = item.get('url', 'URL não encontrada')
         
-        print(f"\n[{idx}/{fim}] Processando: {url[:80]}...")
+        # Para séries, constrói a URL completa com temporada e episódio
+        if tipo_conteudo == 'series':
+            temporada = item.get('temporada_numero', '')
+            episodio = item.get('episodio_numero', '')
+            url_extracao = construir_url_serie(url_base, temporada, episodio)
+            print(f"\n[{idx}/{fim}] Série T{temporada}E{episodio}")
+            print(f"  URL Base: {url_base[:60]}...")
+            print(f"  URL Extração: {url_extracao[:80]}...")
+        else:
+            url_extracao = url_base
+            temporada = None
+            episodio = None
+            print(f"\n[{idx}/{fim}] Processando filme: {url_extracao[:80]}...")
         
         try:
-            resultado = extrair_url_video(url, f"driver_{idx}")
+            resultado = extrair_url_video(url_extracao, f"driver_{idx}")
             
             # Verifica se foi pulado (dublado=False)
             if resultado.get('skipped'):
@@ -145,6 +266,18 @@ def processar_urls():
                 print(f"⊘ PULADO: {reason}")
                 print(f"  Tempo: {resultado.get('extraction_time', 'N/A')}")
                 stats['pulados'] += 1
+                
+                # Atualiza o registro mesmo se pulado (dublado=False)
+                dublado = resultado.get('dublado', False)
+                sucesso, erro = atualizar_registro_supabase(
+                    tipo_conteudo, url_base, "", dublado, temporada, episodio
+                )
+                
+                if sucesso:
+                    print(f"  ✓ Registro atualizado na tabela {TABELAS[tipo_conteudo]}")
+                else:
+                    print(f"  ✗ Erro ao atualizar: {erro}")
+                    stats['erros_atualizacao'] += 1
             
             # Verifica se teve sucesso
             elif resultado.get('success'):
@@ -163,6 +296,17 @@ def processar_urls():
                 print(f"  Video URL: {video_repro_url[:80]}...")
                 print(f"  Dublado: {dublado}")
                 print(f"  Tempo: {extraction_time}")
+                
+                # Atualiza o registro no Supabase na tabela correta
+                sucesso, erro = atualizar_registro_supabase(
+                    tipo_conteudo, url_base, video_repro_url, dublado, temporada, episodio
+                )
+                
+                if sucesso:
+                    print(f"  ✓ Registro atualizado na tabela {TABELAS[tipo_conteudo]}")
+                else:
+                    print(f"  ✗ Erro ao atualizar: {erro}")
+                    stats['erros_atualizacao'] += 1
             
             # Se não teve sucesso e não foi pulado
             else:
@@ -187,13 +331,15 @@ def processar_urls():
     
     # Exibe estatísticas finais
     print(f"\n{'='*60}")
-    print(f"RELATÓRIO FINAL")
+    print(f"RELATÓRIO FINAL - {tipo_conteudo.upper()}")
+    print(f"Tabela: {TABELAS[tipo_conteudo]}")
     print(f"{'='*60}")
     print(f"Total processado:      {stats['total']}")
     print(f"✓ Sucesso (Cache):     {stats['sucesso_cache']}")
     print(f"✓ Sucesso (Extraído):  {stats['sucesso_extracao']}")
     print(f"⊘ Pulados:             {stats['pulados']}")
-    print(f"✗ Erros:               {stats['erros']}")
+    print(f"✗ Erros extração:      {stats['erros']}")
+    print(f"✗ Erros atualização:   {stats['erros_atualizacao']}")
     print(f"{'='*60}")
     
     # Calcula taxa de sucesso

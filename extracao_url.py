@@ -34,12 +34,13 @@ load_dotenv()
 # Configuração Supabase
 SUPABASE_URL = "https://forfhjlkrqjpglfbiosd.supabase.co"
 SUPABASE_APIKEY = os.getenv("SUPABASE_APIKEY")
-SUPABASE_TABLE = "filmes_url_warezcdn"
+SUPABASE_TABLE_FILMES = "filmes_url_warezcdn"
+SUPABASE_TABLE_SERIES = "series_url_warezcdn"
 
 if not SUPABASE_APIKEY:
     logger.error("SUPABASE_APIKEY não encontrada nas variáveis de ambiente!")
 
-def buscar_dados_supabase(url_pagina):
+def buscar_dados_supabase(url_pagina, tipo='filme', temporada=None, episodio=None):
     """Busca os dados completos do registro no Supabase pela URL da página"""
     try:
         headers = {
@@ -48,13 +49,29 @@ def buscar_dados_supabase(url_pagina):
             "Content-Type": "application/json"
         }
         
-        params = {
-            "select": "url,video_url,dublado",
-            "url": f"eq.{url_pagina}"
-        }
+        # Escolhe a tabela baseado no tipo
+        tabela = SUPABASE_TABLE_SERIES if tipo == 'serie' else SUPABASE_TABLE_FILMES
+        
+        # Monta os parâmetros de busca
+        if tipo == 'serie':
+            if temporada is None or episodio is None:
+                logger.error("Para séries é necessário informar temporada e episódio")
+                return None
+            
+            params = {
+                "select": "url,video_url,dublado,temporada_numero,episodio_numero",
+                "url": f"eq.{url_pagina}",
+                "temporada_numero": f"eq.{temporada}",
+                "episodio_numero": f"eq.{episodio}"
+            }
+        else:
+            params = {
+                "select": "url,video_url,dublado",
+                "url": f"eq.{url_pagina}"
+            }
         
         response = requests.get(
-            f"{SUPABASE_URL}/rest/v1/{SUPABASE_TABLE}",
+            f"{SUPABASE_URL}/rest/v1/{tabela}",
             headers=headers,
             params=params,
             timeout=10
@@ -96,7 +113,7 @@ def buscar_dados_supabase(url_pagina):
         logger.error(f"Erro ao buscar dados no Supabase: {e}")
         return None
 
-def verificar_existe_supabase(url_pagina):
+def verificar_existe_supabase(url_pagina, tipo='filme', temporada=None, episodio=None):
     """Verifica se o registro existe no Supabase"""
     try:
         headers = {
@@ -105,13 +122,29 @@ def verificar_existe_supabase(url_pagina):
             "Content-Type": "application/json"
         }
         
-        params = {
-            "select": "url",
-            "url": f"eq.{url_pagina}"
-        }
+        # Escolhe a tabela baseado no tipo
+        tabela = SUPABASE_TABLE_SERIES if tipo == 'serie' else SUPABASE_TABLE_FILMES
+        
+        # Monta os parâmetros de busca
+        if tipo == 'serie':
+            if temporada is None or episodio is None:
+                logger.error("Para séries é necessário informar temporada e episódio")
+                return False
+            
+            params = {
+                "select": "url",
+                "url": f"eq.{url_pagina}",
+                "temporada_numero": f"eq.{temporada}",
+                "episodio_numero": f"eq.{episodio}"
+            }
+        else:
+            params = {
+                "select": "url",
+                "url": f"eq.{url_pagina}"
+            }
         
         response = requests.get(
-            f"{SUPABASE_URL}/rest/v1/{SUPABASE_TABLE}",
+            f"{SUPABASE_URL}/rest/v1/{tabela}",
             headers=headers,
             params=params,
             timeout=10
@@ -130,7 +163,7 @@ def verificar_existe_supabase(url_pagina):
         logger.error(f"Erro ao verificar existência no Supabase: {e}")
         return False
 
-def atualizar_supabase(url_pagina, video_url, dublado=True):
+def atualizar_supabase(url_pagina, video_url, dublado=True, tipo='filme', temporada=None, episodio=None):
     """Atualiza ou cria registro no Supabase"""
     try:
         headers = {
@@ -140,15 +173,26 @@ def atualizar_supabase(url_pagina, video_url, dublado=True):
             "Prefer": "return=minimal"
         }
         
+        # Escolhe a tabela baseado no tipo
+        tabela = SUPABASE_TABLE_SERIES if tipo == 'serie' else SUPABASE_TABLE_FILMES
+        
         # Verifica se o registro existe
-        existe = verificar_existe_supabase(url_pagina)
+        existe = verificar_existe_supabase(url_pagina, tipo, temporada, episodio)
         
         if existe:
             # Registro existe - usa PATCH para atualizar
             logger.info("Registro existe, usando PATCH para atualizar...")
-            params = {
-                "url": f"eq.{url_pagina}"
-            }
+            
+            if tipo == 'serie':
+                params = {
+                    "url": f"eq.{url_pagina}",
+                    "temporada_numero": f"eq.{temporada}",
+                    "episodio_numero": f"eq.{episodio}"
+                }
+            else:
+                params = {
+                    "url": f"eq.{url_pagina}"
+                }
             
             data = {
                 "video_url": video_url,
@@ -156,7 +200,7 @@ def atualizar_supabase(url_pagina, video_url, dublado=True):
             }
             
             response = requests.patch(
-                f"{SUPABASE_URL}/rest/v1/{SUPABASE_TABLE}",
+                f"{SUPABASE_URL}/rest/v1/{tabela}",
                 headers=headers,
                 params=params,
                 json=data,
@@ -172,14 +216,28 @@ def atualizar_supabase(url_pagina, video_url, dublado=True):
         else:
             # Registro não existe - usa POST para criar
             logger.info("Registro não existe, usando POST para criar...")
-            data = {
-                "url": url_pagina,
-                "video_url": video_url,
-                "dublado": dublado
-            }
+            
+            if tipo == 'serie':
+                if temporada is None or episodio is None:
+                    logger.error("Para séries é necessário informar temporada e episódio")
+                    return False
+                
+                data = {
+                    "url": url_pagina,
+                    "video_url": video_url,
+                    "dublado": dublado,
+                    "temporada_numero": temporada,
+                    "episodio_numero": episodio
+                }
+            else:
+                data = {
+                    "url": url_pagina,
+                    "video_url": video_url,
+                    "dublado": dublado
+                }
             
             response = requests.post(
-                f"{SUPABASE_URL}/rest/v1/{SUPABASE_TABLE}",
+                f"{SUPABASE_URL}/rest/v1/{tabela}",
                 headers=headers,
                 json=data,
                 timeout=10
@@ -452,11 +510,30 @@ def wait_for_video_playing(driver, driver_id, max_wait=15):
     logger.warning(f"[{driver_id}] Timeout aguardando vjs-playing")
     return False
 
-def extrair_url_video(url, driver_id):
-    """Extrai a URL do vídeo de uma página do Warezcdn"""
+def extrair_url_video(url, driver_id, tipo='filme', temporada=None, episodio=None):
+    """
+    Extrai a URL do vídeo de uma página do Warezcdn
     
-    logger.info(f"[{driver_id}] Verificando se video_url já existe no Supabase...")
-    resultado_busca = buscar_dados_supabase(url)
+    Args:
+        url: URL da página
+        driver_id: ID do driver para logs
+        tipo: 'filme' ou 'serie'
+        temporada: Número da temporada (obrigatório para séries)
+        episodio: Número do episódio (obrigatório para séries)
+    """
+    
+    # Validação para séries
+    if tipo == 'serie' and (temporada is None or episodio is None):
+        logger.error(f"[{driver_id}] Para séries é necessário informar temporada e episódio")
+        return {
+            'success': False,
+            'error': 'Temporada e episódio são obrigatórios para séries'
+        }
+    
+    identificador = f"T{temporada}E{episodio}" if tipo == 'serie' else "Filme"
+    logger.info(f"[{driver_id}] Verificando se video_url já existe no Supabase ({identificador})...")
+    
+    resultado_busca = buscar_dados_supabase(url, tipo, temporada, episodio)
     
     # Se é um dict com 'skip', não extrai
     if isinstance(resultado_busca, dict) and resultado_busca.get('skip'):
@@ -465,27 +542,33 @@ def extrair_url_video(url, driver_id):
             'success': False,
             'skipped': True,
             'reason': resultado_busca.get('reason'),
-            'extraction_time': '0.00s'
+            'extraction_time': '0.00s',
+            'tipo': tipo,
+            'temporada': temporada,
+            'episodio': episodio
         }
     
     # Se encontrou video_url válida
     if resultado_busca and isinstance(resultado_busca, str):
-        logger.info(f"[{driver_id}] video_url encontrada no Supabase (cache)")
+        logger.info(f"[{driver_id}] video_url encontrada no Supabase (cache) - {identificador}")
         return {
             'success': True, 
             'video_url': resultado_busca,
             'from_cache': True,
-            'extraction_time': '0.00s'
+            'extraction_time': '0.00s',
+            'tipo': tipo,
+            'temporada': temporada,
+            'episodio': episodio
         }
     
-    logger.info(f"[{driver_id}] video_url não encontrada, iniciando extração...")
+    logger.info(f"[{driver_id}] video_url não encontrada, iniciando extração ({identificador})...")
     start_time = time.time()
     driver = None
     dublado = None  # Padrão é nulo
     
     try:
         driver = criar_navegador_firefox_com_ublock()
-        logger.info(f"[{driver_id}] Iniciando extração: {url}")
+        logger.info(f"[{driver_id}] Iniciando extração: {url} ({identificador})")
         
         logger.info(f"[{driver_id}] 1. Navegando para a página...")
         driver.get(url)
@@ -501,12 +584,15 @@ def extrair_url_video(url, driver_id):
             if 'hidden' in classes:
                 logger.warning(f"[{driver_id}] playeroptions-audios tem classe 'hidden' - conteúdo legendado (não dublado)")
                 dublado = False
-                atualizar_supabase(url, None, dublado)
+                atualizar_supabase(url, None, dublado, tipo, temporada, episodio)
                 return {
                     'success': False,
                     'skipped': True,
                     'reason': 'Conteúdo legendado (playeroptions-audios hidden)',
-                    'extraction_time': f"{time.time() - start_time:.2f}s"
+                    'extraction_time': f"{time.time() - start_time:.2f}s",
+                    'tipo': tipo,
+                    'temporada': temporada,
+                    'episodio': episodio
                 }
             else:
                 logger.info(f"[{driver_id}] playeroptions-audios visível - conteúdo pode ser dublado")
@@ -555,7 +641,7 @@ def extrair_url_video(url, driver_id):
             logger.warning(f"[{driver_id}] Server-selector não encontrado - conteúdo não dublado")
             # Marca como False no Supabase para não tentar extrair novamente
             dublado = False
-            atualizar_supabase(url, None, dublado)
+            atualizar_supabase(url, None, dublado, tipo, temporada, episodio)
             raise Exception("Server-selector não encontrado - não dublado")
         
         if not mouse_click(driver, server_selector, driver_id):
@@ -658,31 +744,48 @@ def extrair_url_video(url, driver_id):
                 
                 if video_url and len(video_url) > 10:
                     elapsed = time.time() - start_time
-                    logger.info(f"[{driver_id}] URL encontrada!")
+                    logger.info(f"[{driver_id}] URL encontrada! ({identificador})")
                     
                     # Marca como dublado apenas quando extrai a URL com sucesso
                     dublado = True
                     
                     # Salva no Supabase
-                    atualizar_supabase(url, video_url, dublado)
+                    atualizar_supabase(url, video_url, dublado, tipo, temporada, episodio)
                     
                     return {
                         'success': True, 
                         'video_url': video_url, 
                         'from_cache': False,
                         'extraction_time': f"{elapsed:.2f}s",
-                        'dublado': dublado
+                        'dublado': dublado,
+                        'tipo': tipo,
+                        'temporada': temporada,
+                        'episodio': episodio
                     }
                 
                 time.sleep(2)
             except Exception as e:
                 time.sleep(2)
         
-        return {'success': False, 'error': 'URL do vídeo não encontrada', 'dublado': dublado}
+        return {
+            'success': False, 
+            'error': 'URL do vídeo não encontrada', 
+            'dublado': dublado,
+            'tipo': tipo,
+            'temporada': temporada,
+            'episodio': episodio
+        }
         
     except Exception as e:
         logger.error(f"[{driver_id}] Erro durante extração: {e}")
-        return {'success': False, 'error': str(e), 'dublado': dublado}
+        return {
+            'success': False, 
+            'error': str(e), 
+            'dublado': dublado,
+            'tipo': tipo,
+            'temporada': temporada,
+            'episodio': episodio
+        }
     
     finally:
         if driver:
